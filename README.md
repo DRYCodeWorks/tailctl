@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/tailctl-banner.jpg" alt="tailctl" width="100%">
+</p>
+
 # tailctl
 
 Per-identity Tailscale networking for parallel sessions on a single Mac.
