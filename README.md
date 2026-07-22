@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/tailctl-banner.jpg" alt="tailctl" width="100%">
+  <img src="https://raw.githubusercontent.com/DRYCodeWorks/tailctl/main/docs/tailctl-banner.jpg" alt="tailctl — per-identity Tailscale networking for parallel sessions on a single Mac" width="100%">
 </p>
 
 # tailctl
@@ -26,6 +26,13 @@ Working prototype — macOS-only, single-laptop scope.
 
 Requires macOS, Python 3.11+, and the Homebrew Tailscale daemon (see
 [Requirements](#requirements)).
+
+```
+brew install tailscale
+pipx install tailctl        # or: pip install tailctl
+```
+
+Or from source:
 
 ```
 brew install tailscale

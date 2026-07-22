@@ -5,15 +5,47 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tailctl"
 version = "0.1.0"
-description = "Tailnet identity coordinator for parallel sessions on a single Mac"
+description = "Per-identity Tailscale networking for parallel sessions on a single Mac"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 authors = [{ name = "DRYCodeWorks", email = "dan@drycodeworks.com" }]
+keywords = [
+    "tailscale",
+    "vpn",
+    "wireguard",
+    "networking",
+    "socks5",
+    "proxy",
+    "cli",
+    "macos",
+    "multi-account",
+    "ai-agents",
+    "parallel-sessions",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Networking",
+    "Topic :: Utilities",
+]
 dependencies = [
     "PyYAML>=6.0",
     "psutil>=5.9",
 ]
+
+[project.urls]
+Homepage = "https://drycodeworks.com"
+Repository = "https://github.com/DRYCodeWorks/tailctl"
+Issues = "https://github.com/DRYCodeWorks/tailctl/issues"
 
 [project.optional-dependencies]
 dev = [
