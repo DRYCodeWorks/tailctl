@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# tailctl runtime state (in case of accidental local writes)
+state.json
+state.json.lock
+log.jsonl
+log.1.jsonl

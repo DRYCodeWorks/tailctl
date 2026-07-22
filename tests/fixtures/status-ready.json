@@ -1,0 +1,32 @@
+{
+  "Version": "1.98.2-test",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": [
+    "100.64.0.1",
+    "fd7a:115c:a1e0::1"
+  ],
+  "Self": {
+    "ID": "selfNode01",
+    "PublicKey": "nodekey:0000000000000000000000000000000000000000000000000000000000000000",
+    "HostName": "test-host",
+    "DNSName": "test-host.fixture.ts.net.",
+    "OS": "macOS",
+    "UserID": 1111111111111111,
+    "TailscaleIPs": ["100.64.0.1"],
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": false
+  },
+  "Health": [],
+  "MagicDNSSuffix": "fixture.ts.net",
+  "CurrentTailnet": {
+    "Name": "default.example",
+    "MagicDNSSuffix": "fixture.ts.net",
+    "MagicDNSEnabled": true
+  },
+  "ExitNodeStatus": null,
+  "Peer": {}
+}

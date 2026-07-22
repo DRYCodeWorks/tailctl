@@ -1,0 +1,15 @@
+{
+  "Version": "1.98.2-test",
+  "BackendState": "NeedsLogin",
+  "AuthURL": "https://login.tailscale.com/a/fixture",
+  "Self": {
+    "ID": "selfNode01",
+    "Online": false
+  },
+  "Health": [
+    "not logged in, last login at 0001-01-01T00:00:00Z"
+  ],
+  "CurrentTailnet": null,
+  "ExitNodeStatus": null,
+  "Peer": {}
+}

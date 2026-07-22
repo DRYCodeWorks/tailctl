@@ -1,0 +1,30 @@
+[
+  {
+    "id": "006c",
+    "nickname": "user@example.com",
+    "tailnet": "",
+    "account": "user@example.com",
+    "selected": false
+  },
+  {
+    "id": "a2c4",
+    "nickname": "user@client-a.example",
+    "tailnet": "client-a.example",
+    "account": "user@client-a.example",
+    "selected": false
+  },
+  {
+    "id": "a1b2",
+    "nickname": "user@github",
+    "tailnet": "default.example",
+    "account": "user@github",
+    "selected": true
+  },
+  {
+    "id": "c3d4",
+    "nickname": "user@github",
+    "tailnet": "client-b.example",
+    "account": "user@github",
+    "selected": false
+  }
+]

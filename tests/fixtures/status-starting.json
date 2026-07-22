@@ -1,0 +1,14 @@
+{
+  "Version": "1.98.2-test",
+  "BackendState": "Starting",
+  "Self": {
+    "ID": "selfNode01",
+    "Online": false
+  },
+  "Health": [
+    "Tailscale is starting"
+  ],
+  "CurrentTailnet": null,
+  "ExitNodeStatus": null,
+  "Peer": {}
+}

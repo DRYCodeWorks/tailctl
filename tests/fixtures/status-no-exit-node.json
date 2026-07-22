@@ -1,0 +1,19 @@
+{
+  "Version": "1.98.2-test",
+  "BackendState": "Running",
+  "Self": {
+    "ID": "selfNode01",
+    "HostName": "test-host",
+    "Online": true,
+    "ExitNode": false,
+    "ExitNodeOption": false
+  },
+  "MagicDNSSuffix": "fixture.ts.net",
+  "CurrentTailnet": {
+    "Name": "client-b.example",
+    "MagicDNSSuffix": "fixture.ts.net",
+    "MagicDNSEnabled": true
+  },
+  "ExitNodeStatus": null,
+  "Peer": {}
+}
