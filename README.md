@@ -16,7 +16,19 @@ No always-on daemon beyond the per-identity tailscaled instances. Single-laptop 
 
 ## Status
 
-Prototype. Design plan: `~/.claude/plans/misty-dazzling-pebble.md`.
+Working prototype — macOS-only, single-laptop scope.
+
+## Install
+
+Requires macOS, Python 3.11+, and the Homebrew Tailscale daemon (see
+[Requirements](#requirements)).
+
+```
+brew install tailscale
+git clone https://github.com/DRYCodeWorks/tailctl && cd tailctl
+python3 -m venv .venv && .venv/bin/pip install -e .
+ln -sf "$PWD/.venv/bin/tailctl" ~/.local/bin/tailctl   # put it on PATH
+```
 
 ## Quick view
 
@@ -42,7 +54,7 @@ for each configured `port_forward` so native-TCP clients connect to localhost.
 ## profiles.yaml
 
 ```yaml
-default: drycode-github
+default: acme-dev
 tailscaled_binary: /opt/homebrew/opt/tailscale/bin/tailscaled
 profiles:
   acme-dev:
