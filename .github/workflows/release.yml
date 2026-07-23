@@ -3,16 +3,20 @@ name: release
 # Publishes tailctl to PyPI via OIDC trusted publishing on a version tag.
 # No stored tokens: the job mints a short-lived, workflow-scoped credential from PyPI.
 #
-# Prerequisite (one-time, human, in the PyPI UI) — BEFORE the first tag that uses this:
+# Nothing publishes until the suite passes and the tag matches the packaged
+# version. PyPI versions are immutable, so a bad publish burns that number for
+# good — the gate is much cheaper than the recovery.
+#
+# Prerequisite (one-time, human, in the PyPI UI) — already configured:
 #   PyPI project `tailctl` -> Settings -> Publishing -> Add a trusted publisher:
 #     Owner:          DRYCodeWorks
 #     Repository:     tailctl
 #     Workflow name:  release.yml
 #     Environment:    (leave blank)
-#   (`tailctl` already exists on PyPI, so this is a normal trusted publisher, not a pending one.)
 #
-# Release: bump `version` in pyproject.toml, commit, then push a matching tag:
-#   git tag v0.1.1 && git push origin v0.1.1
+# Release: bump `__version__` in src/tailctl/__init__.py (pyproject reads it
+# from there), commit, then push a matching tag:
+#   git tag v0.1.2 && git push origin v0.1.2
 
 on:
   push:
@@ -23,15 +27,37 @@ permissions:
   contents: read
 
 jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - run: pip install -e '.[dev]'
+      - run: ruff check src tests
+      - run: pytest
+
+      - name: Verify tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(python -c 'import tailctl; print(tailctl.__version__)')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag does not match package version $pkg"
+            exit 1
+          fi
+          echo "tag v$tag matches package version $pkg"
+
   pypi:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # OIDC: mint the PyPI publish credential
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: '3.13'
       - run: python -m pip install --upgrade build
       - run: python -m build
       - uses: pypa/gh-action-pypi-publish@release/v1

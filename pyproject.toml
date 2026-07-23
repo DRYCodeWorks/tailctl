@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tailctl"
-version = "0.1.1"
+# Single source of truth: src/tailctl/__init__.py. See [tool.setuptools.dynamic].
+dynamic = ["version"]
 description = "Per-identity Tailscale networking for parallel sessions on a single Mac"
 readme = "README.md"
 license = { text = "MIT" }
@@ -56,6 +57,9 @@ dev = [
 
 [project.scripts]
 tailctl = "tailctl.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "tailctl.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
