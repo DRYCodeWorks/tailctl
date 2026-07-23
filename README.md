@@ -28,6 +28,13 @@ Requires macOS, Python 3.11+, and the Homebrew Tailscale daemon (see
 [Requirements](#requirements)).
 
 ```
+brew install drycodeworks/tap/tailctl
+```
+
+Homebrew pulls in the `tailscale` formula for you. From PyPI instead, install
+the daemon yourself:
+
+```
 brew install tailscale
 pipx install tailctl        # or: pip install tailctl
 ```
