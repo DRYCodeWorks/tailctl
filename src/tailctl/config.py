@@ -22,6 +22,7 @@ reference an existing profile name.
 from __future__ import annotations
 
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -37,12 +38,32 @@ _ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # port-forward service names (exported as <SERVICE>_ADDR) and auth_key_env.
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-# Userspace-model defaults.
-DEFAULT_TAILSCALED = "/opt/homebrew/opt/tailscale/bin/tailscaled"
+def _resolve_homebrew_binary(name: str, fallback: str) -> str:
+    """Locate a Homebrew-installed Tailscale binary.
+
+    PATH first, so this works on both the arm64 (/opt/homebrew) and Intel
+    (/usr/local) prefixes without hardcoding either. Fall back to the known
+    keg paths for thin-PATH contexts (launchd agents don't get the Homebrew
+    bin dir), then to ``fallback`` so `doctor` can report a concrete path.
+    """
+    found = shutil.which(name)
+    if found:
+        return found
+    for prefix in ("/opt/homebrew", "/usr/local"):
+        candidate = f"{prefix}/opt/tailscale/bin/{name}"
+        if Path(candidate).exists():
+            return candidate
+    return fallback
+
+
+# Userspace-model defaults. Resolved once at import; profiles.yaml overrides win.
+DEFAULT_TAILSCALED = _resolve_homebrew_binary(
+    "tailscaled", "/opt/homebrew/opt/tailscale/bin/tailscaled"
+)
 # The tailscale CLI used to control a per-identity daemon over its --socket.
 # Distinct from `tailscale_binary` (the GUI app's CLI, used only for account
 # discovery in init/bootstrap).
-DEFAULT_TAILSCALE_CLI = "/opt/homebrew/bin/tailscale"
+DEFAULT_TAILSCALE_CLI = _resolve_homebrew_binary("tailscale", "/opt/homebrew/bin/tailscale")
 
 
 class ConfigError(RuntimeError):

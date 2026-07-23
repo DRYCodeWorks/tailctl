@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from tailctl import config as config_mod
 from tailctl import paths
 from tailctl.config import ConfigError, load
 
@@ -265,3 +266,26 @@ profiles:
     )
     with pytest.raises(ConfigError, match="tailscale_binary"):
         load()
+
+
+def test_resolve_homebrew_binary_prefers_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config_mod.shutil, "which", lambda name: f"/somewhere/{name}")
+    assert config_mod._resolve_homebrew_binary("tailscaled", "/fallback") == "/somewhere/tailscaled"
+
+
+def test_resolve_homebrew_binary_falls_back_to_keg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Thin PATH (launchd agents get one) still finds the Intel keg."""
+    monkeypatch.setattr(config_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        Path, "exists", lambda self: str(self) == "/usr/local/opt/tailscale/bin/tailscaled"
+    )
+    assert (
+        config_mod._resolve_homebrew_binary("tailscaled", "/fallback")
+        == "/usr/local/opt/tailscale/bin/tailscaled"
+    )
+
+
+def test_resolve_homebrew_binary_uses_fallback_when_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(config_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    assert config_mod._resolve_homebrew_binary("tailscaled", "/fallback") == "/fallback"

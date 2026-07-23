@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tailctl"
-version = "0.1.0"
+version = "0.1.1"
 description = "Per-identity Tailscale networking for parallel sessions on a single Mac"
 readme = "README.md"
 license = { text = "MIT" }
