@@ -31,6 +31,7 @@ from tailctl.tailscale import (
 class _Call:
     argv: list[str]
     timeout: float | None
+    input_text: str | None
 
 
 class ScriptedRunner:
@@ -45,9 +46,15 @@ class ScriptedRunner:
         self.calls: list[_Call] = []
 
     def __call__(
-        self, argv: list[str], *, timeout: float | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout: float | None = None,
+        input_text: str | None = None,
     ) -> tuple[int, str, str]:
-        self.calls.append(_Call(argv=list(argv), timeout=timeout))
+        self.calls.append(
+            _Call(argv=list(argv), timeout=timeout, input_text=input_text)
+        )
         if not self._responses:
             raise AssertionError(f"unexpected extra call: {argv}")
         return self._responses.pop(0)
@@ -227,6 +234,15 @@ def test_client_set_exit_node_clear_uses_empty_value() -> None:
     client = TailscaleClient(runner=runner)
     client.set_exit_node(None)
     assert runner.calls[0].argv == [DEFAULT_BINARY, "set", "--exit-node="]
+
+def test_up_passes_auth_key_through_stdin_not_argv() -> None:
+    runner = ScriptedRunner([(0, "", "")])
+    client = TailscaleClient(runner=runner)
+    client.up(auth_key="synthetic-secret")
+    call = runner.calls[0]
+    assert "--auth-key=file:/dev/stdin" in call.argv
+    assert all("synthetic-secret" not in arg for arg in call.argv)
+    assert call.input_text == "synthetic-secret"
 
 
 def test_client_status_failure_surfaces_stderr() -> None:

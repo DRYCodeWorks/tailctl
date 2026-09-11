@@ -53,10 +53,9 @@ ln -sf "$PWD/.venv/bin/tailctl" ~/.local/bin/tailctl   # put it on PATH
 ```
 tailctl init                       # scaffold ~/.tailctl/profiles.yaml
 tailctl doctor                     # validate config + probe daemon + verify accounts
-tailctl bootstrap <name> --tailnet <t> [--exit-node <e>] [--port-forward svc=host:port]
-                                   # onboard a NEW tailnet: discovers account_id,
-                                   #   appends a profile (preserving comments), prints
-                                   #   the key steps (mint in console -> store in BWS)
+tailctl bootstrap <name> --tailnet <t> [--exit-node <e>] \
+  [--auth-key-env ENV --auth-key-ssm /client/<scope>/<key>] \
+  [--port-forward svc=host:port]   # onboard a new tailnet with explicit auth sources
 tailctl up acme-dev              # spawn a userspace tailscaled for the profile
                                    #   (first time: prints a one-time auth URL)
 tailctl run acme-dev -- curl http://service.internal   # route a command via that identity
@@ -80,9 +79,8 @@ profiles:
     tailnet: acme.example.ts.net
     exit_node: tailscale-subnet-router-development
     accept_routes: true
-    auth_key_env: ACME_TS_AUTHKEY   # optional: env var holding a Tailscale
-                                      # auth key (from BWS) for non-interactive
-                                      # first login — no browser URL
+    auth_key_env: ACME_TS_AUTHKEY   # optional headless-wrapper short circuit
+    auth_key_ssm: /client/sazabi/acme_ts_authkey  # explicit interactive fallback
     port_forwards:
       - service: clickhouse        # exported as CLICKHOUSE_ADDR
         remote_host: 100.64.0.10
@@ -91,15 +89,17 @@ profiles:
 
 ## Authentication
 
-Each profile is a distinct device on its tailnet, authenticated **once** — the
+Each profile is a distinct device on its tailnet, authenticated **once**—the
 login persists in the profile's statedir and is reused on every later `up`/`run`
-(teardown never logs out). Two ways to do that one-time login:
+(teardown never logs out). Authentication order:
 
-- **Auth key (recommended):** set `auth_key_env` to an env var holding a
-  Tailscale auth key (minted in the tailnet's admin console, stored in BWS).
-  First `up` logs in non-interactively — no browser.
-- **Interactive:** with no auth key, the first `up` prints a login URL to open
-  once.
+1. `auth_key_env`, when a headless wrapper injects it.
+2. The explicit `auth_key_ssm` path through the matching
+   `secrets-<scope>` Identity Center profile.
+3. Interactive login URL when neither source resolves.
+
+The environment always wins, so launchd never attempts an SSO-backed read.
+SSM subprocesses receive no inherited `AWS_*` routing variables.
 
 Profiles that share an account but differ by exit node (e.g. Acme
 dev/staging/prod) are separate profiles → separate nodes → one auth each.

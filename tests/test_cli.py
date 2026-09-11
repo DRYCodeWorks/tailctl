@@ -7,6 +7,7 @@ TailscaleClient and StateStore. The real subprocess never runs.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -159,6 +160,28 @@ def test_doctor_happy_lists_profiles(
     assert "tailscaled:" in out
     assert "dg:" in out and "beta:" in out
 
+def test_doctor_reports_ssm_session_without_inherited_aws(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    paths.profiles_yaml().write_text(
+        "default: dg\nprofiles:\n  dg:\n    account_id: a1b2\n"
+        "    auth_key_env: DG_TS_KEY\n"
+        "    auth_key_ssm: /client/sazabi/dg_ts_authkey\n"
+    )
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr("shutil.which", lambda name: f"/fake/{name}")
+    monkeypatch.setenv("AWS_PROFILE", "attacker")
+    observed = {}
+
+    def run(argv, **kwargs):  # noqa: ANN001, ANN201
+        observed["env"] = kwargs["env"]
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr("subprocess.run", run)
+    assert cli.main(["doctor"]) == 0
+    assert not any(key.startswith("AWS_") for key in observed["env"])
+    assert "aws session secrets-sazabi: ready" in capsys.readouterr().out
+
 
 # --- profiles / reset ---
 
@@ -189,6 +212,13 @@ def test_config_rejects_dotted_auth_key_env(home: Path) -> None:
     )
     rc = cli.main(["profiles"])
     assert rc != 0  # config load fails with a clear error
+
+def test_config_requires_ssm_for_auth_key_env(home: Path) -> None:
+    paths.profiles_yaml().write_text(
+        "default: dg\nprofiles:\n  dg:\n    account_id: a1b2\n"
+        "    auth_key_env: DG_TS_KEY\n"
+    )
+    assert cli.main(["profiles"]) != 0
 
 
 def test_profiles_lists_with_default_marker(
@@ -235,6 +265,8 @@ def test_bootstrap_appends_profile_preserving_existing(
             "--tailnet", "new.example",
             "--exit-node", "ex1",
             "--port-forward", "ch=10.0.0.5:9000",
+            "--auth-key-env", "newnet_ts_authkey",
+            "--auth-key-ssm", "/client/sazabi/newnet_ts_authkey",
         ]
     )
     assert rc == 0
@@ -246,12 +278,13 @@ def test_bootstrap_appends_profile_preserving_existing(
     p = cfg.profiles.get("newnet")
     assert p.account_id == "ab12"
     assert p.exit_node == "ex1"
-    assert p.auth_key_env == "newnet_ts_authkey"  # derived default
+    assert p.auth_key_env == "newnet_ts_authkey"
+    assert p.auth_key_ssm == "/client/sazabi/newnet_ts_authkey"
     assert p.port_forwards[0].service == "ch"
     assert p.port_forwards[0].remote_host == "10.0.0.5"
     assert p.port_forwards[0].remote_port == 9000
     out = capsys.readouterr().out
-    assert "mint a REUSABLE auth key" in out  # next-steps guidance
+    assert "/client/sazabi/newnet_ts_authkey" in out
 
 
 def test_bootstrap_refuses_duplicate_without_force(

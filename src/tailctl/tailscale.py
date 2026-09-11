@@ -93,12 +93,21 @@ class CommandRunner(Protocol):
     """
 
     def __call__(
-        self, argv: list[str], *, timeout: float | None = None
+        self,
+        argv: list[str],
+        *,
+        timeout: float | None = None,
+        input_text: str | None = None,
     ) -> tuple[int, str, str]: ...
 
 
-def real_runner(argv: list[str], *, timeout: float | None = None) -> tuple[int, str, str]:
-    """Production runner: ``subprocess.run`` with shell=False, check=False."""
+def real_runner(
+    argv: list[str],
+    *,
+    timeout: float | None = None,
+    input_text: str | None = None,
+) -> tuple[int, str, str]:
+    """Production runner: ``subprocess.run`` with shell=False and optional stdin."""
     proc = subprocess.run(
         argv,
         shell=False,
@@ -106,6 +115,7 @@ def real_runner(argv: list[str], *, timeout: float | None = None) -> tuple[int, 
         capture_output=True,
         text=True,
         timeout=timeout,
+        input=input_text,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -209,12 +219,10 @@ class TailscaleClient:
         """Issue ``tailscale up`` against this client's (userspace) daemon.
 
         With ``auth_key`` the login is non-interactive and returns once the
-        node is registered. Without it, a first-time login blocks/prints an
-        auth URL on stdout for the caller to surface; an already-authed
-        statedir returns rc=0 immediately. Subprocess timeout still raises.
-
-        The auth key is passed via argv to the tailscale CLI; it is never
-        included in this wrapper's logs or error messages.
+        node is registered. The value is supplied through stdin and referenced
+        as ``file:/dev/stdin`` so it never appears in process argv. Without it,
+        first login blocks/prints an auth URL; an authenticated statedir returns
+        immediately.
         """
         argv = self._argv("up")
         argv.append(f"--accept-routes={'true' if accept_routes else 'false'}")
@@ -224,8 +232,8 @@ class TailscaleClient:
         if hostname:
             argv.append(f"--hostname={hostname}")
         if auth_key:
-            argv.append(f"--auth-key={auth_key}")
-        return self._runner(argv, timeout=timeout_s)
+            argv.append("--auth-key=file:/dev/stdin")
+        return self._runner(argv, timeout=timeout_s, input_text=auth_key)
 
     def logout(self) -> None:
         """Deregister this daemon's node (clears the statedir's login)."""

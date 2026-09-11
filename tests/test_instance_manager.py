@@ -7,6 +7,8 @@ scripted fake whose BackendState the test controls.
 
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +16,7 @@ import pytest
 
 from tailctl import paths
 from tailctl.config import Config
-from tailctl.instance_manager import InstanceManager
+from tailctl.instance_manager import InstanceManager, _default_secret_resolve
 from tailctl.liveness import FakeProcessTable
 from tailctl.profiles import PortForward, Profile, Profiles
 
@@ -42,6 +44,7 @@ def _config() -> Config:
                 account_id="kk00",
                 tailnet="keyed.net",
                 auth_key_env="KEYED_TS_KEY",
+                auth_key_ssm="/client/sazabi/KEYED_TS_KEY",
             ),
         },
     )
@@ -82,7 +85,7 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-def _manager(state: list[str], pt: FakeProcessTable, bws_resolve=None,  # noqa: ANN001
+def _manager(state: list[str], pt: FakeProcessTable, secret_resolve=None,  # noqa: ANN001
              linger=0.0, now_epoch=None):  # noqa: ANN001
     # Spawned daemon/forwarder pids are passed to the real os.kill in _kill;
     # use values above the OS max pid so os.kill always raises ProcessLookupError
@@ -128,7 +131,7 @@ def _manager(state: list[str], pt: FakeProcessTable, bws_resolve=None,  # noqa: 
         spawn_forwarder=spawn_forwarder,
         spawn_login=spawn_login,
         make_client=make_client,
-        bws_resolve=bws_resolve or (lambda key: None),  # no real BWS in unit tests
+        secret_resolve=secret_resolve or (lambda profile: None),
         schedule_reap=lambda s: None,  # don't spawn a real detached reaper
         sleep=lambda s: None,
         clock=tick,
@@ -282,7 +285,7 @@ def test_auth_key_enables_non_interactive_login(
 def test_missing_auth_key_env_falls_back_to_interactive(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """auth_key_env set, var absent, BWS has nothing → interactive login."""
+    """Absent env and unavailable SSM preserve interactive fallback."""
     monkeypatch.delenv("KEYED_TS_KEY", raising=False)
     pt = FakeProcessTable({5000: 500.0})
     mgr, spawned = _manager(["NeedsLogin"], pt)
@@ -290,25 +293,71 @@ def test_missing_auth_key_env_falls_back_to_interactive(
     result = _up(mgr, "keyed")
 
     assert result.needs_auth
-    assert spawned["logins"] == 1  # fell back to the interactive kick
+    assert spawned["logins"] == 1
 
 
-def test_auth_key_resolved_from_bws_when_env_absent(
+def test_auth_key_resolved_from_ssm_when_env_absent(
     tmp_home: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Env var absent but BWS has the secret → non-interactive login via the
-    BWS-resolved key (no browser, no `bws run` wrapper needed)."""
     monkeypatch.delenv("KEYED_TS_KEY", raising=False)
-    pt = FakeProcessTable({5000: 500.0})
     state = ["NeedsLogin"]
-    resolved = {"KEYED_TS_KEY": "tskey-from-bws"}
-    mgr, spawned = _manager(state, pt, bws_resolve=lambda k: resolved.get(k))
-
+    mgr, spawned = _manager(
+        state,
+        FakeProcessTable({5000: 500.0}),
+        secret_resolve=lambda profile: (
+            "tskey-from-ssm" if profile.name == "keyed" else None
+        ),
+    )
     result = _up(mgr, "keyed")
-
     assert result.ready and not result.needs_auth
-    assert any(c["auth_key"] == "tskey-from-bws" for c in spawned["up_calls"])
-    assert spawned["logins"] == 0  # BWS-resolved key, no interactive kick
+    assert any(c["auth_key"] == "tskey-from-ssm" for c in spawned["up_calls"])
+    assert spawned["logins"] == 0
+
+
+def test_env_auth_key_skips_ssm_resolver(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KEYED_TS_KEY", "env-key")
+    calls = []
+    mgr, _ = _manager(
+        ["NeedsLogin"],
+        FakeProcessTable({5000: 500.0}),
+        secret_resolve=lambda profile: calls.append(profile),
+    )
+    _up(mgr, "keyed")
+    assert calls == []
+
+
+def test_default_ssm_resolver_scrubs_aws_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = _config().profiles.get("keyed")
+    monkeypatch.setenv("AWS_ENDPOINT_URL_SSM", "https://attacker.invalid")
+    monkeypatch.setenv("AWS_PROFILE", "attacker")
+    monkeypatch.setattr("tailctl.instance_manager.shutil.which", lambda name: "/fake/aws")
+    observed = {}
+
+    def run(argv, **kwargs):  # noqa: ANN001, ANN201
+        observed["argv"] = argv
+        observed["env"] = kwargs["env"]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "Parameter": {
+                        "Name": profile.auth_key_ssm,
+                        "Value": "ssm-key",
+                    }
+                }
+            ),
+        )
+
+    monkeypatch.setattr("tailctl.instance_manager.subprocess.run", run)
+    assert _default_secret_resolve(profile) == "ssm-key"
+    assert not any(key.startswith("AWS_") for key in observed["env"])
+    assert "--profile" in observed["argv"]
+    assert "secrets-sazabi" in observed["argv"]
+    assert os.environ["AWS_PROFILE"] == "attacker"
 
 
 def test_discover_exit_node_matches_suffix_variant_not_prefix(tmp_home: Path) -> None:

@@ -150,37 +150,58 @@ def _default_schedule_reap(linger_seconds: float) -> None:
         )
 
 
-def _default_bws_resolve(secret_key: str) -> str | None:
-    """Fetch a secret value from Bitwarden Secrets Manager by its key name.
-
-    Used as the fallback when the auth-key env var isn't already injected into
-    tailctl's environment — lets a bare ``tailctl up`` self-resolve the key via
-    the ambient ``BWS_ACCESS_TOKEN`` (or bws config), instead of requiring a
-    ``bws run --`` wrapper. Returns None if bws is absent, unauthenticated, or
-    the key isn't found. The secret value is never logged.
-    """
-    if not shutil.which("bws"):
+def _default_secret_resolve(profile: Profile) -> str | None:
+    """Resolve one declared SSM auth key without inherited AWS routing state."""
+    parameter = profile.auth_key_ssm
+    if not parameter:
         return None
+    parts = parameter.split("/")
+    if (
+        len(parts) != 4
+        or parts[1] != "client"
+        or parts[2] not in {"sazabi", "frost"}
+    ):
+        return None
+    aws = shutil.which("aws")
+    if not aws:
+        return None
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("AWS_")
+    }
     try:
         proc = subprocess.run(
-            ["bws", "secret", "list", "-o", "json"],
+            [
+                aws,
+                "ssm",
+                "get-parameter",
+                "--name",
+                parameter,
+                "--with-decryption",
+                "--profile",
+                f"secrets-{parts[2]}",
+                "--region",
+                "us-east-2",
+                "--output",
+                "json",
+            ],
             capture_output=True,
             text=True,
             timeout=20,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
     try:
-        for secret in json.loads(proc.stdout):
-            if isinstance(secret, dict) and secret.get("key") == secret_key:
-                val = secret.get("value")
-                return val if isinstance(val, str) and val else None
+        item = json.loads(proc.stdout).get("Parameter", {})
     except (json.JSONDecodeError, TypeError):
         return None
-    return None
+    value = item.get("Value") if item.get("Name") == parameter else None
+    return value if isinstance(value, str) and value else None
 
 
 class InstanceManager:
@@ -194,7 +215,7 @@ class InstanceManager:
         spawn_forwarder: SpawnForwarder = _default_spawn_forwarder,
         spawn_login: Callable[[list[str], str], None] = _default_spawn_login,
         make_client: MakeClient | None = None,
-        bws_resolve: Callable[[str], str | None] = _default_bws_resolve,
+        secret_resolve: Callable[[Profile], str | None] = _default_secret_resolve,
         schedule_reap: Callable[[float], None] = _default_schedule_reap,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -216,7 +237,7 @@ class InstanceManager:
                 binary=config.tailscale_cli_binary, socket=sock
             )
         )
-        self._bws_resolve = bws_resolve
+        self._secret_resolve = secret_resolve
         self._schedule_reap = schedule_reap
         self._sleep = sleep
         self._clock = clock
@@ -676,19 +697,12 @@ class InstanceManager:
     # --- small helpers ---
 
     def _resolve_auth_key(self, profile: Profile) -> str | None:
-        """Return the Tailscale auth key for a profile, or None for interactive
-        login.
-
-        Resolution order for ``profile.auth_key_env``:
-        1. the environment (if something injected it, e.g. ``bws run --``), then
-        2. Bitwarden Secrets Manager by that same key name (ambient token), so a
-           bare ``tailctl up`` self-resolves without a wrapper.
-        Unset everywhere → None (interactive fallback)."""
+        """Resolve env-first, then the profile's explicit SSM parameter."""
         if not profile.auth_key_env:
             return None
         return (
             os.environ.get(profile.auth_key_env)
-            or self._bws_resolve(profile.auth_key_env)
+            or self._secret_resolve(profile)
             or None
         )
 

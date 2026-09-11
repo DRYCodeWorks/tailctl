@@ -209,6 +209,25 @@ def _parse(raw: dict[str, Any]) -> Config:
                 f"shell cannot export names containing '.' or '-'."
             )
 
+        auth_key_ssm = body.get("auth_key_ssm") or None
+        if auth_key_ssm is not None and (
+            not isinstance(auth_key_ssm, str)
+            or not re.fullmatch(
+                r"/client/(sazabi|frost)/"
+                r"[A-Za-z_][A-Za-z0-9_]*",
+                auth_key_ssm,
+            )
+        ):
+            raise ConfigError(
+                f"profiles.yaml: profile {name!r} `auth_key_ssm` must be an "
+                "explicit /client/<known-scope>/<key> path"
+            )
+        if auth_key_env and not auth_key_ssm:
+            raise ConfigError(
+                f"profiles.yaml: profile {name!r} has auth_key_env but no "
+                "auth_key_ssm fallback"
+            )
+
         port_forwards = _parse_port_forwards(name, body.get("port_forwards"))
 
         by_name[name] = Profile(
@@ -220,6 +239,7 @@ def _parse(raw: dict[str, Any]) -> Config:
             accept_routes=accept_routes,
             port_forwards=port_forwards,
             auth_key_env=auth_key_env,
+            auth_key_ssm=auth_key_ssm,
         )
 
     if default_name not in by_name:

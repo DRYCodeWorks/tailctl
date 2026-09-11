@@ -128,8 +128,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p_boot.add_argument("--exit-node", help="exit-node hostname (optional)")
     p_boot.add_argument(
         "--auth-key-env",
-        help="env/BWS secret name holding this tailnet's auth key "
-        "(default: <name-with-underscores>_ts_authkey)",
+        help="optional env var holding a headless Tailscale auth key",
+    )
+    p_boot.add_argument(
+        "--auth-key-ssm",
+        help="explicit /client/<scope>/<key> SSM path for first login",
     )
     p_boot.add_argument(
         "--port-forward",
@@ -238,11 +241,9 @@ def _safe_profile_name(seed: str) -> str:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    """Validate the userspace-per-identity model: config, the tailscaled daemon
-    binary, the tailscale CLI, bws (for key self-resolve), and per-profile
-    registration state."""
+    """Validate binaries, SSM session state, and profile registration."""
     import shutil
-
+    import subprocess
     try:
         config = load_config()
     except ConfigError as exc:
@@ -275,16 +276,42 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         )
         ok = False
 
-    # bws — lets first registration self-resolve auth keys without `bws run`.
-    if any(p.auth_key_env for p in config.profiles.by_name.values()):
-        if shutil.which("bws"):
-            print("bws: present (auth keys self-resolve on first `up`)")
-        else:
-            print(
-                "bws: NOT FOUND — first registration will need a `bws run` "
-                "wrapper or interactive login",
-                file=sys.stderr,
+    ssm_profiles = {
+        f"secrets-{profile.auth_key_ssm.split('/')[2]}"
+        for profile in config.profiles.by_name.values()
+        if profile.auth_key_ssm
+    }
+    aws = shutil.which("aws")
+    if ssm_profiles and not aws:
+        print("aws: NOT FOUND — SSM auth-key resolution unavailable", file=sys.stderr)
+        ok = False
+    elif aws:
+        print(f"aws: {aws}")
+        clean_env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("AWS_")
+        }
+        for profile_name in sorted(ssm_profiles):
+            result = subprocess.run(
+                [
+                    aws,
+                    "sts",
+                    "get-caller-identity",
+                    "--profile",
+                    profile_name,
+                    "--region",
+                    "us-east-2",
+                    "--output",
+                    "json",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=clean_env,
             )
+            state = "ready" if result.returncode == 0 else "login required"
+            print(f"aws session {profile_name}: {state}")
 
     # Per-profile summary + whether a node has already been registered (statedir).
     for name in config.profiles.names():
@@ -295,6 +322,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             bits.append(f"exit={p.exit_node}")
         if p.auth_key_env:
             bits.append(f"key=${p.auth_key_env}")
+        if p.auth_key_ssm:
+            bits.append(f"ssm={p.auth_key_ssm}")
         bits.append("registered" if registered else "not-yet-registered")
         print(f"  {name}: {', '.join(bits)}")
 
@@ -563,7 +592,8 @@ def _render_profile_block(
     tailnet: str | None,
     exit_node: str | None,
     accept_routes: bool,
-    auth_key_env: str,
+    auth_key_env: str | None,
+    auth_key_ssm: str | None,
     forwards: list[tuple[str, str, int]],
 ) -> str:
     """Render a profiles.yaml profile block as text (so existing comments in the
@@ -574,7 +604,10 @@ def _render_profile_block(
     if exit_node:
         lines.append(f"    exit_node: {exit_node}")
     lines.append(f"    accept_routes: {'true' if accept_routes else 'false'}")
-    lines.append(f"    auth_key_env: {auth_key_env}")
+    if auth_key_env:
+        lines.append(f"    auth_key_env: {auth_key_env}")
+    if auth_key_ssm:
+        lines.append(f"    auth_key_ssm: {auth_key_ssm}")
     if forwards:
         lines.append("    port_forwards:")
         for svc, host, port in forwards:
@@ -638,11 +671,24 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         forwards.append((svc, host, port))
 
-    auth_key_env = args.auth_key_env or f"{name.replace('-', '_')}_ts_authkey"
+    auth_key_env = args.auth_key_env
+    auth_key_ssm = args.auth_key_ssm
+    if bool(auth_key_env) != bool(auth_key_ssm):
+        print(
+            "error: --auth-key-env and --auth-key-ssm must be supplied together",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
     block = _render_profile_block(
-        name, account_id, args.tailnet, args.exit_node,
-        args.accept_routes, auth_key_env, forwards,
+        name,
+        account_id,
+        args.tailnet,
+        args.exit_node,
+        args.accept_routes,
+        auth_key_env,
+        auth_key_ssm,
+        forwards,
     )
 
     # Append under `profiles:` (last top-level key) — text append preserves the
@@ -659,9 +705,11 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
 
     print(f"bootstrapped profile {name!r} (account={account_id}, tailnet={args.tailnet})")
     print("next steps to finish onboarding this tailnet:")
-    print(f"  1. mint a REUSABLE auth key in {args.tailnet or 'the tailnet'}'s admin console")
-    print(f"  2. store it in BWS under the key name: {auth_key_env}")
-    print(f"  3. register the node:  tailctl up {name}")
+    if auth_key_ssm:
+        print(f"  1. seed the reusable auth key at {auth_key_ssm}")
+        print(f"  2. register the node:  tailctl up {name}")
+    else:
+        print(f"  1. register interactively:  tailctl up {name}")
 
     if args.register:
         print("\n--register: attempting first registration now...")

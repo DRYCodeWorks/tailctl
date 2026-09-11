@@ -39,11 +39,11 @@ class Profile:
     # Userspace-model fields:
     accept_routes: bool = True
     port_forwards: tuple[PortForward, ...] = field(default_factory=tuple)
-    # Name of an env var holding a Tailscale auth key for this profile's
-    # tailnet (sourced from BWS). When set and present in the environment,
-    # first login is non-interactive (no browser URL). Absent → fall back to
-    # the interactive one-time login.
+    # Optional environment short-circuit for headless launchd wrappers.
     auth_key_env: str | None = None
+    # Explicit SSM parameter for interactive first registration. The path is
+    # declared per profile; it is never inferred from the profile or env name.
+    auth_key_ssm: str | None = None
 
 
 class UnknownProfileError(KeyError):
