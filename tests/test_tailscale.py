@@ -245,6 +245,12 @@ def test_up_passes_auth_key_through_stdin_not_argv() -> None:
     assert call.input_text == "synthetic-secret"
 
 
+def test_up_raises_shields() -> None:
+    runner = ScriptedRunner([(0, "", "")])
+    TailscaleClient(runner=runner).up()
+    assert "--shields-up" in runner.calls[0].argv
+
+
 def test_client_status_failure_surfaces_stderr() -> None:
     runner = ScriptedRunner([(1, "", "daemon not running")])
     client = TailscaleClient(runner=runner)

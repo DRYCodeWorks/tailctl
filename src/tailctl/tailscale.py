@@ -227,6 +227,8 @@ class TailscaleClient:
         argv = self._argv("up")
         argv.append(f"--accept-routes={'true' if accept_routes else 'false'}")
         argv.append(f"--accept-dns={'true' if accept_dns else 'false'}")
+        # Refuse inbound: a userspace node forwards it to this host's loopback.
+        argv.append("--shields-up")
         if exit_node:
             argv.append(f"--exit-node={exit_node}")
         if hostname:

@@ -91,7 +91,7 @@ def _manager(state: list[str], pt: FakeProcessTable, secret_resolve=None,  # noq
     # use values above the OS max pid so os.kill always raises ProcessLookupError
     # (never signals a coincidental real process during teardown tests).
     next_pid = [900001]
-    spawned = {"daemons": [], "forwarders": [], "logins": 0}
+    spawned = {"daemons": [], "forwarders": [], "logins": 0, "login_argvs": []}
 
     def spawn_daemon(argv, log):  # noqa: ANN001
         pid = next_pid[0]
@@ -109,6 +109,7 @@ def _manager(state: list[str], pt: FakeProcessTable, secret_resolve=None,  # noq
 
     def spawn_login(argv, log):  # noqa: ANN001
         spawned["logins"] += 1
+        spawned["login_argvs"].append(argv)
 
     clock = [0.0]
 
@@ -294,6 +295,7 @@ def test_missing_auth_key_env_falls_back_to_interactive(
 
     assert result.needs_auth
     assert spawned["logins"] == 1
+    assert "--shields-up" in spawned["login_argvs"][0]
 
 
 def test_auth_key_resolved_from_ssm_when_env_absent(

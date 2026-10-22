@@ -505,6 +505,10 @@ class InstanceManager:
             "up",
             f"--accept-routes={'true' if profile.accept_routes else 'false'}",
             "--accept-dns=false",
+            # A userspace node forwards inbound tailnet connections to this
+            # host's 127.0.0.1, so without shields every peer on the client's
+            # tailnet could reach our local services. tailctl only dials out.
+            "--shields-up",
             "--hostname=tailctl-" + profile.name,
         ]
         self._spawn_login(argv, log_path)
