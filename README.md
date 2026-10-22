@@ -61,8 +61,13 @@ tailctl up acme-dev              # spawn a userspace tailscaled for the profile
 tailctl run acme-dev -- curl http://service.internal   # route a command via that identity
 tailctl run acme-dev -- clickhouse-client --host 127.0.0.1 --port $CLICKHOUSE_ADDR
 tailctl ps                         # list running instances + their proxy ports/forwards
+tailctl shields [--fix]            # confirm every instance refuses inbound (exit 5 if not)
 tailctl down acme-dev            # release (refcount--); stops the daemon at zero
 ```
+
+A userspace node delivers inbound tailnet connections to this host's `127.0.0.1`,
+so tailctl keeps shields up on every instance: `up` and `run` read the pref back
+and raise it, and refuse to hand out an instance they can't confirm.
 
 `run` sets `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (+ `NO_PROXY`) so proxy-aware
 clients route through the identity, and exports `<SERVICE>_ADDR=127.0.0.1:<port>`

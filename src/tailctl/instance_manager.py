@@ -64,6 +64,19 @@ class UpResult:
     auth_url: str | None = None
 
 
+@dataclass(frozen=True)
+class ShieldsReport:
+    """One instance's inbound posture, as ``tailctl shields`` reports it.
+
+    ``state`` is ``up``; ``down`` (seen, not fixed); ``raised`` (was down, now
+    up); ``stopped`` (could not be confirmed up, so the daemon was torn down);
+    or ``unknown`` (the daemon didn't answer).
+    """
+
+    profile: str
+    state: str
+
+
 class InstanceError(RuntimeError):
     """Instance lifecycle failure surfaced to the CLI."""
 
@@ -287,6 +300,14 @@ class InstanceManager:
             return None
         client = self._make_client(inst.socket)
         if self._is_running(client):
+            # Every claim re-checks shields, so one flipped down after spawn is
+            # caught on the next `up`/`run`. A daemon that can't be confirmed is
+            # torn down; reap drops its row once the pid is gone.
+            try:
+                self._enforce_shields(client, profile.name)
+            except InstanceError:
+                self._teardown_instance(inst)
+                raise
             # Finalize a previously-pending (just-authed) instance exactly once.
             if not inst.finalized:
                 if profile.exit_node:
@@ -369,6 +390,13 @@ class InstanceManager:
     def list_instances(self) -> list[Instance]:
         reg = self._store.read()
         return list(reg.instances.values())
+
+    def shields(self, *, fix: bool = False) -> list[ShieldsReport]:
+        """Report every instance's shields. With ``fix``, raise any that are
+        down and tear down any that still can't be confirmed up."""
+        with self._store.transaction() as reg:
+            self._reap_inplace(reg)
+            return [self._shields_report(reg, name, fix) for name in list(reg.instances)]
 
     # === internals =========================================================
 
@@ -460,19 +488,20 @@ class InstanceManager:
                     )
                     return self._auth_result(profile.name, client)
 
-        # Running: set exit node (if any), start forwards, register. The node
-        # is Running but its netmap may still be syncing the exit-node peer, so
-        # retry until the hostname resolves. If it ultimately can't be applied,
-        # _set_exit_node_with_retry RAISES — we must NOT register a ready
-        # instance that routes through the wrong/no exit node, so tear the
-        # just-spawned daemon down and propagate.
-        if profile.exit_node:
-            try:
+        # Running: confirm shields, set exit node (if any), start forwards,
+        # register. The node is Running but its netmap may still be syncing the
+        # exit-node peer, so retry until the hostname resolves. Both checks
+        # RAISE rather than register a ready instance that accepts inbound or
+        # routes through the wrong/no exit node, so tear the just-spawned
+        # daemon down and propagate.
+        try:
+            self._enforce_shields(client, profile.name)
+            if profile.exit_node:
                 self._set_exit_node_with_retry(client, profile)
-            except InstanceError:
-                self._kill(pid)
-                self._cleanup_socket(sock)
-                raise
+        except InstanceError:
+            self._kill(pid)
+            self._cleanup_socket(sock)
+            raise
         forwards = self._start_forwards(profile, rundir, socks_port)
         inst = Instance(
             profile=profile.name,
@@ -489,6 +518,49 @@ class InstanceManager:
         with self._store.transaction() as reg:
             reg.instances[profile.name] = inst
         return self._ready_result(profile.name, inst)
+
+    def _enforce_shields(self, client: TailscaleClient, profile_name: str) -> bool:
+        """Make sure the daemon refuses inbound; return True if it had to raise them.
+
+        ``tailscale up --shields-up`` alone is not enough: a saved login that
+        reaches Running on its own skips ``up``, and ``up`` refuses to change
+        anything when stored prefs carry a setting it wasn't given (an exit
+        node). So read the pref back. RAISES InstanceError unless shields are
+        confirmed up: a userspace node delivers inbound tailnet connections to
+        this host's 127.0.0.1.
+        """
+        try:
+            if client.shields_up():
+                return False
+            client.raise_shields()
+            if client.shields_up():
+                return True
+        except TailscaleError as exc:
+            raise InstanceError(
+                f"{profile_name}: could not verify shields ({exc}). Refusing to keep "
+                f"a node that may accept inbound tailnet connections."
+            ) from exc
+        raise InstanceError(
+            f"{profile_name}: shields still down after `tailscale set --shields-up=true`. "
+            f"Refusing to keep a node that accepts inbound tailnet connections."
+        )
+
+    def _shields_report(self, reg, name: str, fix: bool) -> ShieldsReport:
+        inst = reg.instances[name]
+        client = self._make_client(inst.socket)
+        if not fix:
+            try:
+                return ShieldsReport(name, "up" if client.shields_up() else "down")
+            except TailscaleError:
+                return ShieldsReport(name, "unknown")
+        try:
+            raised = self._enforce_shields(client, name)
+        except InstanceError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+            self._teardown_instance(inst)
+            del reg.instances[name]
+            return ShieldsReport(name, "stopped")
+        return ShieldsReport(name, "raised" if raised else "up")
 
     def _kick_login(self, profile: Profile, client: TailscaleClient, log_path: str) -> None:
         """Run `tailscale up` detached so it can block on interactive auth while

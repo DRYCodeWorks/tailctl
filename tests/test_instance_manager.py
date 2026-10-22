@@ -16,9 +16,15 @@ import pytest
 
 from tailctl import paths
 from tailctl.config import Config
-from tailctl.instance_manager import InstanceManager, _default_secret_resolve
+from tailctl.instance_manager import (
+    InstanceError,
+    InstanceManager,
+    ShieldsReport,
+    _default_secret_resolve,
+)
 from tailctl.liveness import FakeProcessTable
 from tailctl.profiles import PortForward, Profile, Profiles
+from tailctl.tailscale import TailscaleError
 
 
 def _config() -> Config:
@@ -54,9 +60,12 @@ def _config() -> Config:
 class FakeClient:
     """status() reflects a shared mutable state cell so tests flip Running."""
 
-    def __init__(self, socket: str, state: list[str]) -> None:
+    def __init__(self, socket: str, state: list[str], shields: dict | None = None) -> None:
         self._socket = socket
         self._state = state  # one-element mutable list
+        # Shared shields cell: "up" is the pref, "stuck" makes raising a no-op,
+        # "error" makes every read fail, "raised" counts raise attempts.
+        self._shields = shields or _shields_cell()
         self.exit_node_set: str | None = None
         self.logged_out = False
         self.up_calls: list[dict] = []  # may be replaced with a shared list
@@ -65,6 +74,16 @@ class FakeClient:
         st = self._state[0]
         raw = {} if st == "Running" else {"AuthURL": "https://login.example/abc"}
         return SimpleNamespace(backend_state=st, raw=raw)
+
+    def shields_up(self) -> bool:
+        if self._shields["error"]:
+            raise TailscaleError("debug prefs failed (rc=1): no daemon")
+        return self._shields["up"]
+
+    def raise_shields(self) -> None:
+        self._shields["raised"] += 1
+        if not self._shields["stuck"]:
+            self._shields["up"] = True
 
     def up(self, *, auth_key=None, **kw):  # noqa: ANN001, ANN201
         self.up_calls.append({"auth_key": auth_key, **kw})
@@ -77,6 +96,10 @@ class FakeClient:
 
     def logout(self) -> None:
         self.logged_out = True
+
+
+def _shields_cell() -> dict:
+    return {"up": True, "stuck": False, "error": False, "raised": 0}
 
 
 @pytest.fixture
@@ -119,9 +142,11 @@ def _manager(state: list[str], pt: FakeProcessTable, secret_resolve=None,  # noq
 
     up_calls: list[dict] = []
     spawned["up_calls"] = up_calls
+    shields = _shields_cell()
+    spawned["shields"] = shields
 
     def make_client(sock):  # noqa: ANN001
-        c = FakeClient(sock, state)
+        c = FakeClient(sock, state, shields)
         c.up_calls = up_calls  # shared across the per-call clients
         return c
 
@@ -459,3 +484,115 @@ def test_reap_skips_untracked_orphan_while_spawn_in_progress(tmp_home: Path) -> 
 
     assert 900500 not in killed  # spared while spawn lock held
     assert "acme" not in reaped
+
+
+# --- shields (a userspace node delivers inbound to this host's 127.0.0.1) ---
+
+
+def test_up_raises_shields_a_reconnected_login_left_down(tmp_home: Path) -> None:
+    """A saved login that reaches Running on its own skips `tailscale up`, so
+    its stored prefs decide shields. up() must read them back and raise them."""
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt)
+    spawned["shields"]["up"] = False
+
+    result = _up(mgr, "acme")
+
+    assert result.ready
+    assert spawned["shields"]["raised"] == 1
+    assert spawned["shields"]["up"] is True
+
+
+def test_up_refuses_and_kills_daemon_when_shields_wont_raise(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt)
+    spawned["shields"].update(up=False, stuck=True)
+    killed = _spy_kill(mgr, pt)
+
+    with pytest.raises(InstanceError, match="shields still down"):
+        _up(mgr, "acme")
+
+    assert spawned["daemons"][0] in killed
+    assert spawned["forwarders"] == []  # never got as far as forwards
+    assert mgr.list_instances() == []
+
+
+def test_up_refuses_when_shields_cannot_be_read(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt)
+    spawned["shields"]["error"] = True
+
+    with pytest.raises(InstanceError, match="could not verify shields"):
+        _up(mgr, "acme")
+
+    assert mgr.list_instances() == []
+
+
+def test_reuse_raises_shields_flipped_after_spawn(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0, 6000: 600.0})
+    mgr, spawned = _manager(["Running"], pt)
+    _up(mgr, "acme", OWNER)
+    spawned["shields"]["up"] = False  # e.g. `tailscale set --shields-up=false`
+
+    result = _up(mgr, "acme", OWNER2)
+
+    assert result.ready
+    assert spawned["shields"]["up"] is True
+    assert len(spawned["daemons"]) == 1  # reused, not respawned
+
+
+def test_reuse_tears_down_instance_whose_shields_wont_raise(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0, 6000: 600.0})
+    mgr, spawned = _manager(["Running"], pt)
+    _up(mgr, "acme", OWNER)
+    killed = _spy_kill(mgr, pt)
+    spawned["shields"].update(up=False, stuck=True)
+
+    with pytest.raises(InstanceError, match="shields still down"):
+        _up(mgr, "acme", OWNER2)
+
+    assert spawned["daemons"][0] in killed
+    assert spawned["forwarders"][0][0] in killed
+    mgr.reap()  # the dead daemon's row goes on the next reap
+    assert mgr.list_instances() == []
+
+
+def test_shields_reports_without_fixing(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt)
+    _up(mgr, "acme")
+    spawned["shields"]["up"] = False
+
+    assert mgr.shields() == [ShieldsReport("acme", "down")]
+    assert spawned["shields"]["raised"] == 0
+
+
+def test_shields_fix_raises_then_reports_up(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt)
+    _up(mgr, "acme")
+    spawned["shields"]["up"] = False
+
+    assert mgr.shields(fix=True) == [ShieldsReport("acme", "raised")]
+    assert mgr.shields() == [ShieldsReport("acme", "up")]
+
+
+def test_shields_fix_stops_instance_it_cannot_confirm(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt)
+    _up(mgr, "acme")
+    killed = _spy_kill(mgr, pt)
+    spawned["shields"].update(up=False, stuck=True)
+
+    assert mgr.shields(fix=True) == [ShieldsReport("acme", "stopped")]
+    assert spawned["daemons"][0] in killed
+    assert mgr.list_instances() == []
+
+
+def test_shields_unknown_when_daemon_does_not_answer(tmp_home: Path) -> None:
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt)
+    _up(mgr, "acme")
+    spawned["shields"]["error"] = True
+
+    assert mgr.shields() == [ShieldsReport("acme", "unknown")]

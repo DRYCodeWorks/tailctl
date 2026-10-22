@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 from tailctl import cli, paths
+from tailctl.instance_manager import ShieldsReport
 
 
 @pytest.fixture
@@ -35,6 +36,12 @@ profiles:
     exit_node: beta-exit
 """
     )
+
+
+def _stub_no_instances(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Doctor's shields check reads the registry, which a global Path.exists
+    patch would point at a file that isn't there."""
+    monkeypatch.setattr("tailctl.cli.InstanceManager.shields", lambda self, *, fix=False: [])
 
 
 # --- init ---
@@ -154,6 +161,7 @@ def test_doctor_happy_lists_profiles(
     """Binaries present → ok, with a per-profile summary."""
     _write_minimal_config(home)
     monkeypatch.setattr(Path, "exists", lambda self: True)
+    _stub_no_instances(monkeypatch)
     rc = cli.main(["doctor"])
     out = capsys.readouterr().out
     assert rc == 0
@@ -169,6 +177,7 @@ def test_doctor_reports_ssm_session_without_inherited_aws(
         "    auth_key_ssm: /client/sazabi/dg_ts_authkey\n"
     )
     monkeypatch.setattr(Path, "exists", lambda self: True)
+    _stub_no_instances(monkeypatch)
     monkeypatch.setattr("shutil.which", lambda name: f"/fake/{name}")
     monkeypatch.setenv("AWS_PROFILE", "attacker")
     observed = {}
@@ -303,3 +312,48 @@ def test_bootstrap_requires_account_or_tailnet(
     rc = cli.main(["bootstrap", "newnet"])
     assert rc != 0
     assert "--account-id or --tailnet" in capsys.readouterr().err
+
+
+# --- shields ---
+
+
+def test_shields_ok_when_no_instances(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _write_minimal_config(home)
+    rc = cli.main(["shields"])
+    assert rc == 0
+    assert "no running instances" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("state", "rc"),
+    [("up", cli.EXIT_OK), ("down", cli.EXIT_DRIFT), ("raised", cli.EXIT_DRIFT),
+     ("stopped", cli.EXIT_DRIFT), ("unknown", cli.EXIT_DRIFT)],
+)
+def test_shields_exits_drift_unless_every_instance_was_up(
+    home: Path, monkeypatch: pytest.MonkeyPatch, state: str, rc: int
+) -> None:
+    """A repaired instance still exits non-zero so a scheduled check alerts."""
+    _write_minimal_config(home)
+    calls: list[bool] = []
+
+    def fake_shields(self: Any, *, fix: bool = False) -> list[ShieldsReport]:
+        calls.append(fix)
+        return [ShieldsReport("dg", state)]
+
+    monkeypatch.setattr("tailctl.cli.InstanceManager.shields", fake_shields)
+    assert cli.main(["shields", "--fix"]) == rc
+    assert calls == [True]
+
+
+def test_doctor_fails_when_an_instance_has_shields_down(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_minimal_config(home)
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(
+        "tailctl.cli.InstanceManager.shields",
+        lambda self, *, fix=False: [ShieldsReport("dg", "down")],
+    )
+    rc = cli.main(["doctor"])
+    assert rc == cli.EXIT_ERROR
+    assert "shields dg: down" in capsys.readouterr().err

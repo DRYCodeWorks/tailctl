@@ -20,6 +20,7 @@ from tailctl.tailscale import (
     TailscaleClient,
     TailscaleConvergenceTimeout,
     TailscaleError,
+    parse_shields_up,
     parse_status,
     parse_switch_list,
 )
@@ -360,3 +361,36 @@ def test_subprocess_timeout_is_passed_through() -> None:
     client.switch_list()
     assert runner.calls[0].timeout is not None
     assert runner.calls[0].timeout > 0
+
+
+# --- shields ---
+
+
+def test_parse_shields_up_reads_the_flag() -> None:
+    assert parse_shields_up('{"ShieldsUp": true, "WantRunning": true}') is True
+    assert parse_shields_up('{"ShieldsUp": false}') is False
+
+
+@pytest.mark.parametrize("stdout", ["{}", '{"ShieldsUp": "yes"}', "[]", "not json"])
+def test_parse_shields_up_rejects_missing_or_malformed(stdout: str) -> None:
+    with pytest.raises(TailscaleError):
+        parse_shields_up(stdout)
+
+
+def test_client_shields_up_reads_debug_prefs_on_its_socket() -> None:
+    runner = ScriptedRunner([(0, '{"ShieldsUp": true}', "")])
+    client = TailscaleClient(binary="ts", runner=runner, socket="/tmp/x.sock")
+    assert client.shields_up() is True
+    assert runner.calls[0].argv == ["ts", "--socket=/tmp/x.sock", "debug", "prefs"]
+
+
+def test_client_raise_shields_sets_the_pref() -> None:
+    runner = ScriptedRunner([(0, "", "")])
+    TailscaleClient(binary="ts", runner=runner).raise_shields()
+    assert runner.calls[0].argv == ["ts", "set", "--shields-up=true"]
+
+
+def test_client_raise_shields_surfaces_stderr_on_failure() -> None:
+    runner = ScriptedRunner([(1, "", "access denied")])
+    with pytest.raises(TailscaleError, match="access denied"):
+        TailscaleClient(runner=runner).raise_shields()

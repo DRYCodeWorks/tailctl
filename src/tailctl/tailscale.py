@@ -175,6 +175,19 @@ class TailscaleClient:
             raise TailscaleError(f"status --json failed (rc={rc}): {stderr.strip()}")
         return parse_status(stdout)
 
+    def shields_up(self) -> bool:
+        """Whether this daemon refuses every inbound tailnet connection.
+
+        Read from ``tailscale debug prefs``; ``status --json`` doesn't carry it.
+        """
+        rc, stdout, stderr = self._runner(
+            self._argv("debug", "prefs"),
+            timeout=DEFAULT_SUBPROCESS_TIMEOUT_S,
+        )
+        if rc != 0:
+            raise TailscaleError(f"debug prefs failed (rc={rc}): {stderr.strip()}")
+        return parse_shields_up(stdout)
+
     def active_account(self) -> SwitchAccount | None:
         for acct in self.switch_list():
             if acct.selected:
@@ -205,6 +218,15 @@ class TailscaleClient:
             raise TailscaleError(
                 f"set --exit-node={value!r} failed (rc={rc}): {stderr.strip()}"
             )
+
+    def raise_shields(self) -> None:
+        """Issue ``tailscale set --shields-up=true``."""
+        rc, _stdout, stderr = self._runner(
+            self._argv("set", "--shields-up=true"),
+            timeout=DEFAULT_SUBPROCESS_TIMEOUT_S,
+        )
+        if rc != 0:
+            raise TailscaleError(f"set --shields-up=true failed (rc={rc}): {stderr.strip()}")
 
     def up(
         self,
@@ -339,6 +361,18 @@ def parse_status(stdout: str) -> TailscaleStatus:
         exit_node=exit_node,
         raw=data,
     )
+
+
+def parse_shields_up(stdout: str) -> bool:
+    """Parse ``debug prefs`` and return its ``ShieldsUp`` flag."""
+    try:
+        data = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise TailscaleError(f"debug prefs: invalid JSON: {exc}") from exc
+    value = data.get("ShieldsUp") if isinstance(data, dict) else None
+    if not isinstance(value, bool):
+        raise TailscaleError("debug prefs: missing or non-boolean ShieldsUp")
+    return value
 
 
 def _resolve_exit_node_hostname(

@@ -12,6 +12,7 @@ Subcommands:
   run      — run a command routed through a profile's identity
   down     — release a profile (refcount--); stop the daemon at zero
   ps       — list running userspace instances
+  shields  — check (or --fix) that every running instance refuses inbound
   reset    — stop ALL instances and clear the registry (requires --force)
 """
 
@@ -111,6 +112,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ps = sub.add_parser("ps", help="list running userspace instances")
     p_ps.add_argument("--json", action="store_true", help="emit JSON")
     p_ps.set_defaults(func=_cmd_ps)
+
+    p_shields = sub.add_parser(
+        "shields", help="check that every running instance refuses inbound connections"
+    )
+    p_shields.add_argument(
+        "--fix",
+        action="store_true",
+        help="raise shields that are down; stop instances that still can't be confirmed",
+    )
+    p_shields.set_defaults(func=_cmd_shields)
 
     p_reap = sub.add_parser(
         "reap", help="stop instances whose owner died or whose linger expired"
@@ -327,7 +338,22 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         bits.append("registered" if registered else "not-yet-registered")
         print(f"  {name}: {', '.join(bits)}")
 
+    ok = _doctor_shields(config) and ok
     return EXIT_OK if ok else EXIT_ERROR
+
+
+def _doctor_shields(config: Config) -> bool:
+    """A userspace node delivers inbound tailnet connections to this host's
+    127.0.0.1, so every running instance must have shields up."""
+    ok = True
+    for report in _build_instance_manager(config).shields():
+        line = f"shields {report.profile}: {report.state}"
+        if report.state == "up":
+            print(line)
+        else:
+            print(f"{line} — run `tailctl shields --fix`", file=sys.stderr)
+            ok = False
+    return ok
 
 
 # === profiles / reset =====================================================
@@ -567,6 +593,22 @@ def _cmd_ps(args: argparse.Namespace) -> int:
                 f"-> {f.remote_host}:{f.remote_port}"
             )
     return EXIT_OK
+
+
+def _cmd_shields(args: argparse.Namespace) -> int:
+    """Exit EXIT_DRIFT unless every instance already had shields up, so a
+    scheduled check still alerts when ``--fix`` repaired the drift."""
+    try:
+        config = load_config()
+    except ConfigError as exc:
+        print(f"config: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    reports = _build_instance_manager(config).shields(fix=args.fix)
+    if not reports:
+        print("no running instances")
+    for report in reports:
+        print(f"  {report.profile}: shields {report.state}")
+    return EXIT_OK if all(r.state == "up" for r in reports) else EXIT_DRIFT
 
 
 # === bootstrap ============================================================
