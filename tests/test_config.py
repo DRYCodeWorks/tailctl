@@ -289,3 +289,36 @@ def test_resolve_homebrew_binary_uses_fallback_when_absent(monkeypatch: pytest.M
     monkeypatch.setattr(config_mod.shutil, "which", lambda name: None)
     monkeypatch.setattr(Path, "exists", lambda self: False)
     assert config_mod._resolve_homebrew_binary("tailscaled", "/fallback") == "/fallback"
+
+
+_MINIMAL = """
+default: dg
+profiles:
+  dg:
+    account_id: a1b2
+"""
+
+
+def test_listen_host_defaults_to_localhost(home: Path) -> None:
+    paths.profiles_yaml().write_text(_MINIMAL)
+    assert load().listen_host == "127.0.0.1"
+
+
+def test_listen_host_accepts_a_loopback_alias(home: Path) -> None:
+    paths.profiles_yaml().write_text("listen_host: 127.84.67.1\n" + _MINIMAL)
+    assert load().listen_host == "127.84.67.1"
+
+
+@pytest.mark.parametrize(
+    "value", ["0.0.0.0", "192.168.1.5", "100.64.0.10", "::1", "localhost", "2130706433"]
+)
+def test_listen_host_rejects_anything_but_ipv4_loopback(home: Path, value: str) -> None:
+    paths.profiles_yaml().write_text(f"listen_host: {value!r}\n" + _MINIMAL)
+    with pytest.raises(ConfigError, match="listen_host"):
+        load()
+
+
+def test_listen_host_rejects_a_bare_integer(home: Path) -> None:
+    paths.profiles_yaml().write_text("listen_host: 2130706433\n" + _MINIMAL)
+    with pytest.raises(ConfigError, match="must be a string"):
+        load()

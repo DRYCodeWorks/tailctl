@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
+from tailctl import paths
 from tailctl.registry import Forward, Holder, Instance, RegistryStore
 
 
@@ -70,3 +72,18 @@ def test_transaction_does_not_write_on_exception(tmp_home: Path) -> None:
             raise RuntimeError("boom")
     # The aborted transaction left the prior state intact.
     assert "a" in RegistryStore().read().instances
+
+
+def test_row_without_listen_host_loads_as_localhost(tmp_home: Path) -> None:
+    # Rows written before listen_host existed were all bound to 127.0.0.1.
+    store = RegistryStore()
+    with store.transaction() as reg:
+        reg.instances["a"] = Instance(
+            profile="a", pid=1, create_time=1.0, socket="s", statedir="d",
+            socks_port=1, http_port=2,
+        )
+    path = paths.instances_json()
+    raw = json.loads(path.read_text())
+    del raw["instances"]["a"]["listen_host"]
+    path.write_text(json.dumps(raw))
+    assert RegistryStore().read().instances["a"].listen_host == "127.0.0.1"

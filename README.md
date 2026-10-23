@@ -70,14 +70,26 @@ so tailctl keeps shields up on every instance: `up` and `run` read the pref back
 and raise it, and refuse to hand out an instance they can't confirm.
 
 `run` sets `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (+ `NO_PROXY`) so proxy-aware
-clients route through the identity, and exports `<SERVICE>_ADDR=127.0.0.1:<port>`
+clients route through the identity, and exports `<SERVICE>_ADDR=<listen_host>:<port>`
 for each configured `port_forward` so native-TCP clients connect to localhost.
+
+The proxies take no credentials, so anything that can reach their port can use
+the identity. They bind `listen_host` (default `127.0.0.1`). On a machine that
+runs containers, set it to a loopback alias: OrbStack forwards
+`host.docker.internal` to `127.0.0.1` and `::1` (but not to other `lo0`
+addresses), so every container could otherwise tunnel into the tailnet. The
+alias must already be on `lo0` (`sudo ifconfig lo0 alias 127.84.67.1
+255.255.255.255`, run at boot). If it is missing, `up` and `run` refuse to
+start rather than fall back to `127.0.0.1`.
+An instance spawned before `listen_host` changed keeps its old address until
+its holders exit, and every claim on it prints a warning.
 
 ## profiles.yaml
 
 ```yaml
 default: acme-dev
 tailscaled_binary: /opt/homebrew/opt/tailscale/bin/tailscaled
+listen_host: 127.84.67.1         # optional loopback alias; default 127.0.0.1
 profiles:
   acme-dev:
     account_id: a2c4

@@ -485,9 +485,10 @@ def _cmd_up(args: argparse.Namespace) -> int:
         _print_auth_instructions(result)
         return EXIT_AUTH
     print(f"{result.profile}: up")
-    print(f"  socks5: 127.0.0.1:{result.socks_port}  http: 127.0.0.1:{result.http_port}")
+    host = result.listen_host
+    print(f"  socks5: {host}:{result.socks_port}  http: {host}:{result.http_port}")
     for service, lp in (result.forwards or {}).items():
-        print(f"  forward {service}: 127.0.0.1:{lp}")
+        print(f"  forward {service}: {host}:{lp}")
     return EXIT_OK
 
 
@@ -530,17 +531,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
         _print_auth_instructions(result)
         return EXIT_AUTH
 
+    host = result.listen_host
     env = dict(os.environ)
-    env["ALL_PROXY"] = f"socks5h://127.0.0.1:{result.socks_port}"
+    env["ALL_PROXY"] = f"socks5h://{host}:{result.socks_port}"
     env["all_proxy"] = env["ALL_PROXY"]
-    env["HTTP_PROXY"] = f"http://127.0.0.1:{result.http_port}"
+    env["HTTP_PROXY"] = f"http://{host}:{result.http_port}"
     env["HTTPS_PROXY"] = env["HTTP_PROXY"]
     env["http_proxy"] = env["HTTP_PROXY"]
     env["https_proxy"] = env["HTTP_PROXY"]
-    env["NO_PROXY"] = "localhost,127.0.0.1,::1"
+    # The literal alias too: many clients ignore 127.0.0.0/8 in NO_PROXY, and a
+    # forward dialed through the proxy would fail.
+    env["NO_PROXY"] = ",".join(dict.fromkeys(["localhost", "127.0.0.1", "::1", host]))
     env["no_proxy"] = env["NO_PROXY"]
     for service, lp in (result.forwards or {}).items():
-        env[f"{service.upper()}_ADDR"] = f"127.0.0.1:{lp}"
+        env[f"{service.upper()}_ADDR"] = f"{host}:{lp}"
     try:
         proc = __import__("subprocess").run(command, env=env, check=False)
         rc = proc.returncode
@@ -585,11 +589,11 @@ def _cmd_ps(args: argparse.Namespace) -> int:
     for inst in instances:
         print(
             f"  {inst.profile}  pid={inst.pid}  refcount={inst.refcount}  "
-            f"socks=127.0.0.1:{inst.socks_port}  http=127.0.0.1:{inst.http_port}"
+            f"socks={inst.listen_host}:{inst.socks_port}  http={inst.listen_host}:{inst.http_port}"
         )
         for f in inst.forwards:
             print(
-                f"      forward {f.service}: 127.0.0.1:{f.local_port} "
+                f"      forward {f.service}: {inst.listen_host}:{f.local_port} "
                 f"-> {f.remote_host}:{f.remote_port}"
             )
     return EXIT_OK

@@ -50,7 +50,9 @@ async def _scenario() -> bytes:
     socks_server = await _fake_socks5_echo_server(socks_port)
 
     serve_task = asyncio.create_task(
-        forwarder.serve(local_port, socks_port, "service.tailnet", 9000)
+        forwarder.serve(
+            forwarder.ForwardRoute("127.0.0.1", local_port, socks_port, "service.tailnet", 9000)
+        )
     )
     await asyncio.sleep(0.2)  # let both servers bind
 

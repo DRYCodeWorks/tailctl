@@ -4,6 +4,7 @@ The on-disk shape:
 
     default: drycode-github
     tailscale_binary: /Applications/Tailscale.app/Contents/MacOS/Tailscale  # optional
+    listen_host: 127.84.67.1           # optional; loopback address the proxies bind
     profiles:
       drycode-github:
         account_id: a1b2
@@ -21,6 +22,7 @@ reference an existing profile name.
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import shutil
 from dataclasses import dataclass
@@ -37,6 +39,11 @@ _ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Env-var-name safe: what a shell can actually export/expand. Used for
 # port-forward service names (exported as <SERVICE>_ADDR) and auth_key_env.
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Where the SOCKS/HTTP proxies and port-forwards listen. A loopback alias (e.g.
+# 127.84.67.1 on lo0) keeps them off 127.0.0.1, which container runtimes such
+# as OrbStack forward host.docker.internal to: every container could otherwise
+# tunnel into the client tailnet through an unauthenticated proxy.
+DEFAULT_LISTEN_HOST = "127.0.0.1"
 
 def _resolve_homebrew_binary(name: str, fallback: str) -> str:
     """Locate a Homebrew-installed Tailscale binary.
@@ -80,6 +87,7 @@ class Config:
     # drive a per-identity daemon over its --socket.
     tailscaled_binary: str = DEFAULT_TAILSCALED
     tailscale_cli_binary: str = DEFAULT_TAILSCALE_CLI
+    listen_host: str = DEFAULT_LISTEN_HOST
 
 
 def load(path: Path | None = None) -> Config:
@@ -123,6 +131,8 @@ def _parse(raw: dict[str, Any]) -> Config:
     tailscale_cli_binary = raw.get("tailscale_cli_binary", DEFAULT_TAILSCALE_CLI)
     if not isinstance(tailscale_cli_binary, str) or not tailscale_cli_binary:
         raise ConfigError("profiles.yaml: `tailscale_cli_binary` must be a non-empty string")
+
+    listen_host = _parse_listen_host(raw.get("listen_host", DEFAULT_LISTEN_HOST))
 
     profiles_section = raw.get("profiles")
     if not isinstance(profiles_section, dict) or not profiles_section:
@@ -253,7 +263,25 @@ def _parse(raw: dict[str, Any]) -> Config:
         tailscale_binary=binary,
         tailscaled_binary=tailscaled_binary,
         tailscale_cli_binary=tailscale_cli_binary,
+        listen_host=listen_host,
     )
+
+
+def _parse_listen_host(raw: Any) -> str:
+    """Accept only an IPv4 loopback address: the proxies must never face a network."""
+    if not isinstance(raw, str):
+        raise ConfigError("profiles.yaml: `listen_host` must be a string")
+    try:
+        addr = ipaddress.IPv4Address(raw)
+    except (ipaddress.AddressValueError, ValueError) as exc:
+        raise ConfigError(
+            f"profiles.yaml: `listen_host` {raw!r} is not an IPv4 address"
+        ) from exc
+    if not addr.is_loopback:
+        raise ConfigError(
+            f"profiles.yaml: `listen_host` {raw!r} must be a loopback address (127.0.0.0/8)"
+        )
+    return str(addr)
 
 
 def _parse_port_forwards(profile_name: str, raw: Any) -> tuple[PortForward, ...]:

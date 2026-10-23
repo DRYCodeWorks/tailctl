@@ -1,14 +1,14 @@
 """Localhost TCP forward through a userspace tailscaled SOCKS5 proxy.
 
 This is the native-DB path: clients that ignore proxy env vars (ClickHouse
-native :9000, Postgres, SQL Server) connect to a stable ``127.0.0.1:<local_port>``
+native :9000, Postgres, SQL Server) connect to a stable ``<listen_host>:<local_port>``
 and the relay tunnels each connection through the profile's userspace tailscaled
 SOCKS5 proxy to ``<remote_host>:<remote_port>`` on the tailnet.
 
 Validated end-to-end in the Phase 0 spike (a non-proxy curl reached a tailnet
 Caddy through this exact relay). Run as a detached process per forward:
 
-    python -m tailctl.forwarder <local_port> <socks_port> <remote_host> <remote_port>
+    python -m tailctl.forwarder <listen_host> <local_port> <socks_port> <remote_host> <remote_port>
 
 The instance manager spawns one per configured port-forward and records its pid
 in the registry so it can be reaped with the instance.
@@ -20,6 +20,20 @@ import asyncio
 import contextlib
 import struct
 import sys
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ForwardRoute:
+    """One relay: ``listen_host:local_port`` -> SOCKS5 on ``listen_host:socks_port``
+    -> ``remote_host:remote_port`` on the tailnet. The SOCKS proxy shares the
+    forward's listen host because one tailscaled owns both."""
+
+    listen_host: str
+    local_port: int
+    socks_port: int
+    remote_host: str
+    remote_port: int
 
 
 async def socks5_connect(
@@ -74,12 +88,12 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter) -> None:
             dst.close()
 
 
-async def serve(
-    local_port: int, socks_port: int, remote_host: str, remote_port: int
-) -> None:
+async def serve(route: ForwardRoute) -> None:
     async def handle(cr: asyncio.StreamReader, cw: asyncio.StreamWriter) -> None:
         try:
-            pr, pw = await socks5_connect("127.0.0.1", socks_port, remote_host, remote_port)
+            pr, pw = await socks5_connect(
+                route.listen_host, route.socks_port, route.remote_host, route.remote_port
+            )
         except Exception as e:  # noqa: BLE001
             print(f"forwarder: upstream connect failed: {e}", file=sys.stderr)
             with contextlib.suppress(Exception):
@@ -92,10 +106,10 @@ async def serve(
             with contextlib.suppress(Exception):
                 w.close()
 
-    server = await asyncio.start_server(handle, "127.0.0.1", local_port)
+    server = await asyncio.start_server(handle, route.listen_host, route.local_port)
     print(
-        f"forwarder: 127.0.0.1:{local_port} -> socks5 127.0.0.1:{socks_port} "
-        f"-> {remote_host}:{remote_port}",
+        f"forwarder: {route.listen_host}:{route.local_port} -> socks5 "
+        f"{route.listen_host}:{route.socks_port} -> {route.remote_host}:{route.remote_port}",
         flush=True,
     )
     async with server:
@@ -104,16 +118,16 @@ async def serve(
 
 def main(argv: list[str] | None = None) -> int:
     args = argv if argv is not None else sys.argv[1:]
-    if len(args) != 4:
+    if len(args) != 5:
         print(
-            "usage: python -m tailctl.forwarder <local_port> <socks_port> "
+            "usage: python -m tailctl.forwarder <listen_host> <local_port> <socks_port> "
             "<remote_host> <remote_port>",
             file=sys.stderr,
         )
         return 2
-    lp, sp, rh, rp = int(args[0]), int(args[1]), args[2], int(args[3])
+    route = ForwardRoute(args[0], int(args[1]), int(args[2]), args[3], int(args[4]))
     try:
-        asyncio.run(serve(lp, sp, rh, rp))
+        asyncio.run(serve(route))
     except KeyboardInterrupt:
         return 0
     return 0

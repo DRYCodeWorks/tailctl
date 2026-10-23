@@ -77,6 +77,9 @@ class Instance:
     # window during which the warm daemon is kept for fast reuse. None while held
     # (or when the owner crashed: then reap stops it immediately, no grace).
     released_at: float | None = None
+    # Loopback address the proxies and forwards bind. Rows written before the
+    # field existed were all on 127.0.0.1.
+    listen_host: str = "127.0.0.1"
 
     @property
     def refcount(self) -> int:
@@ -104,6 +107,7 @@ def _registry_from_dict(data: dict[str, Any]) -> Registry:
     _fields = (
         "profile", "pid", "create_time", "socket", "statedir",
         "socks_port", "http_port", "created_at", "finalized", "released_at",
+        "listen_host",
     )
     for name, body in (data.get("instances") or {}).items():
         forwards = [Forward(**f) for f in body.get("forwards", [])]

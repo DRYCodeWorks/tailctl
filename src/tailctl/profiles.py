@@ -16,11 +16,11 @@ class PortForward:
 
     Under the userspace-per-identity model, a profile's tailnet may host
     services (ClickHouse, Postgres, …) that native clients reach by connecting
-    to a stable ``127.0.0.1:<local_port>``. The forwarder relays that local
+    to a stable ``<listen_host>:<local_port>``. The forwarder relays that local
     port through the profile's userspace tailscaled to ``remote_host:remote_port``.
     ``local_port`` is optional; when 0/None the instance allocates a free port.
     The resolved port is exported to ``tailctl run`` subprocesses as
-    ``<SERVICE>_ADDR=127.0.0.1:<local_port>`` (service upper-cased).
+    ``<SERVICE>_ADDR=<listen_host>:<local_port>`` (service upper-cased).
     """
 
     service: str

@@ -7,6 +7,7 @@ scripted fake whose BackendState the test controls.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tailctl import paths
+from tailctl import instance_manager, paths
 from tailctl.config import Config
 from tailctl.instance_manager import (
     InstanceError,
@@ -109,7 +110,7 @@ def tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def _manager(state: list[str], pt: FakeProcessTable, secret_resolve=None,  # noqa: ANN001
-             linger=0.0, now_epoch=None):  # noqa: ANN001
+             linger=0.0, now_epoch=None, config=None):  # noqa: ANN001
     # Spawned daemon/forwarder pids are passed to the real os.kill in _kill;
     # use values above the OS max pid so os.kill always raises ProcessLookupError
     # (never signals a coincidental real process during teardown tests).
@@ -121,13 +122,15 @@ def _manager(state: list[str], pt: FakeProcessTable, secret_resolve=None,  # noq
         next_pid[0] += 1
         pt.spawn(pid, float(pid))
         spawned["daemons"].append(pid)
+        spawned.setdefault("daemon_argvs", []).append(argv)
         return pid
 
-    def spawn_forwarder(lp, sp, host, port, log):  # noqa: ANN001
+    def spawn_forwarder(route, log):  # noqa: ANN001
         pid = next_pid[0]
         next_pid[0] += 1
         pt.spawn(pid, float(pid))
-        spawned["forwarders"].append((pid, lp, host, port))
+        spawned["forwarders"].append((pid, route.local_port, route.remote_host, route.remote_port))
+        spawned.setdefault("routes", []).append(route)
         return pid
 
     def spawn_login(argv, log):  # noqa: ANN001
@@ -151,7 +154,7 @@ def _manager(state: list[str], pt: FakeProcessTable, secret_resolve=None,  # noq
         return c
 
     mgr = InstanceManager(
-        _config(),
+        config or _config(),
         process_table=pt,
         spawn_daemon=spawn_daemon,
         spawn_forwarder=spawn_forwarder,
@@ -596,3 +599,58 @@ def test_shields_unknown_when_daemon_does_not_answer(tmp_home: Path) -> None:
     spawned["shields"]["error"] = True
 
     assert mgr.shields() == [ShieldsReport("acme", "unknown")]
+
+
+# --- listen_host (container runtimes forward host.docker.internal to 127.0.0.1) ---
+
+ALIAS = "127.84.67.1"
+
+
+def _alias_config() -> Config:
+    return dataclasses.replace(_config(), listen_host=ALIAS)
+
+
+def test_up_binds_proxies_and_forwards_to_listen_host(
+    tmp_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The alias is not on lo0 in a test run, so hand out ports without binding.
+    ports = iter(range(41000, 41010))
+    monkeypatch.setattr(instance_manager, "_free_port", lambda host: next(ports))
+    pt = FakeProcessTable({5000: 500.0})
+    mgr, spawned = _manager(["Running"], pt, config=_alias_config())
+
+    result = _up(mgr, "acme")
+
+    argv = spawned["daemon_argvs"][0]
+    assert f"--socks5-server={ALIAS}:{result.socks_port}" in argv
+    assert f"--outbound-http-proxy-listen={ALIAS}:{result.http_port}" in argv
+    assert result.listen_host == ALIAS
+    route = spawned["routes"][0]
+    assert (route.listen_host, route.socks_port) == (ALIAS, result.socks_port)
+    assert mgr.list_instances()[0].listen_host == ALIAS
+
+
+def test_up_refuses_listen_host_not_on_this_machine(tmp_home: Path) -> None:
+    # 192.0.2.1 is TEST-NET-1: never assigned, so the bind fails like a missing alias.
+    pt = FakeProcessTable({5000: 500.0})
+    cfg = dataclasses.replace(_config(), listen_host="192.0.2.1")
+    mgr, spawned = _manager(["Running"], pt, config=cfg)
+    with pytest.raises(InstanceError, match="not assigned to this machine"):
+        _up(mgr, "acme")
+    assert spawned["daemons"] == []  # never falls back to 127.0.0.1
+
+
+def test_reuse_warns_when_instance_predates_listen_host(
+    tmp_home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pt = FakeProcessTable({5000: 500.0, 6000: 600.0})
+    old_mgr, _ = _manager(["Running"], pt)  # spawned on 127.0.0.1
+    _up(old_mgr, "acme", OWNER)
+    capsys.readouterr()
+
+    mgr, spawned = _manager(["Running"], pt, config=_alias_config())
+    result = _up(mgr, "acme", OWNER2)
+
+    assert spawned["daemons"] == []  # the live daemon is shared, not replaced
+    assert result.listen_host == "127.0.0.1"  # callers get its real address
+    assert f"listens on 127.0.0.1, profiles.yaml says {ALIAS}" in capsys.readouterr().err

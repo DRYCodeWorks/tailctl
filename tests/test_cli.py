@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from tailctl import cli, paths
-from tailctl.instance_manager import ShieldsReport
+from tailctl.instance_manager import ShieldsReport, UpResult
 
 
 @pytest.fixture
@@ -357,3 +357,31 @@ def test_doctor_fails_when_an_instance_has_shields_down(
     rc = cli.main(["doctor"])
     assert rc == cli.EXIT_ERROR
     assert "shields dg: down" in capsys.readouterr().err
+
+
+# --- run ---
+
+
+def test_run_points_proxies_and_forwards_at_listen_host(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_minimal_config(home)
+    result = UpResult(
+        profile="dg", ready=True, socks_port=41000, http_port=41001,
+        forwards={"clickhouse": 41002}, listen_host="127.84.67.1",
+    )
+    monkeypatch.setattr("tailctl.cli.InstanceManager.up", lambda self, *a, **k: result)
+    monkeypatch.setattr("tailctl.cli.InstanceManager.down", lambda self, *a, **k: None)
+    seen: dict[str, str] = {}
+
+    def fake_run(command, env, check):  # noqa: ANN001
+        seen.update(env)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    assert cli.main(["run", "dg", "--", "true"]) == 0
+    assert seen["ALL_PROXY"] == "socks5h://127.84.67.1:41000"
+    assert seen["HTTPS_PROXY"] == "http://127.84.67.1:41001"
+    assert seen["CLICKHOUSE_ADDR"] == "127.84.67.1:41002"
+    # A forward dialed through the proxy would fail, so the alias bypasses it.
+    assert "127.84.67.1" in seen["NO_PROXY"].split(",")

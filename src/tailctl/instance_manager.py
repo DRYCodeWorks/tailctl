@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 
 from tailctl import paths
 from tailctl.config import Config
+from tailctl.forwarder import ForwardRoute
 from tailctl.liveness import ProcessTable, PsutilProcessTable
 from tailctl.profiles import Profile
 from tailctl.registry import Forward, Holder, Instance, RegistryStore
@@ -45,8 +46,8 @@ from tailctl.tailscale import TailscaleClient, TailscaleError
 
 # Type of a daemon-spawn seam: (argv, log_path) -> pid
 SpawnDaemon = Callable[[list[str], str], int]
-# Type of a forwarder-spawn seam: (local_port, socks_port, host, port, log_path) -> pid
-SpawnForwarder = Callable[[int, int, str, int, str], int]
+# Type of a forwarder-spawn seam: (route, log_path) -> pid
+SpawnForwarder = Callable[[ForwardRoute, str], int]
 # Type of a client factory bound to a socket.
 MakeClient = Callable[[str], TailscaleClient]
 
@@ -60,6 +61,7 @@ class UpResult:
     socks_port: int | None = None
     http_port: int | None = None
     forwards: dict[str, int] | None = None  # service -> local_port
+    listen_host: str = "127.0.0.1"  # where socks/http/forward ports listen
     needs_auth: bool = False
     auth_url: str | None = None
 
@@ -85,10 +87,22 @@ def _now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _free_port() -> int:
-    """Ask the OS for an unused localhost TCP port."""
+def _free_port(host: str) -> int:
+    """Ask the OS for an unused TCP port on ``host``.
+
+    Doubles as the preflight for a loopback alias: binding an address that is
+    not on lo0 fails, and tailctl must stop rather than fall back to 127.0.0.1,
+    which would silently re-expose the proxies to containers.
+    """
     with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
+        try:
+            s.bind((host, 0))
+        except OSError as exc:
+            raise InstanceError(
+                f"listen_host {host} is not assigned to this machine ({exc.strerror}). "
+                f"Add the loopback alias (ifconfig lo0 alias {host}) or remove "
+                f"listen_host from profiles.yaml."
+            ) from exc
         return s.getsockname()[1]
 
 
@@ -128,18 +142,17 @@ def _default_spawn_daemon(argv: list[str], log_path: str) -> int:
     return _spawn_detached(argv, log_path)
 
 
-def _default_spawn_forwarder(
-    local_port: int, socks_port: int, remote_host: str, remote_port: int, log_path: str
-) -> int:
+def _default_spawn_forwarder(route: ForwardRoute, log_path: str) -> int:
     return _spawn_detached(
         [
             sys.executable,
             "-m",
             "tailctl.forwarder",
-            str(local_port),
-            str(socks_port),
-            remote_host,
-            str(remote_port),
+            route.listen_host,
+            str(route.local_port),
+            str(route.socks_port),
+            route.remote_host,
+            str(route.remote_port),
         ],
         log_path,
     )
@@ -298,6 +311,7 @@ class InstanceManager:
         inst = reg.instances.get(profile.name)
         if inst is None or not self._alive(inst.pid, inst.create_time):
             return None
+        self._warn_listen_drift(inst)
         client = self._make_client(inst.socket)
         if self._is_running(client):
             # Every claim re-checks shields, so one flipped down after spawn is
@@ -312,9 +326,7 @@ class InstanceManager:
             if not inst.finalized:
                 if profile.exit_node:
                     self._set_exit_node_with_retry(client, profile)  # raises on hard fail
-                inst.forwards = self._start_forwards(
-                    profile, paths.instance_dir(profile.name), inst.socks_port
-                )
+                inst.forwards = self._start_forwards(profile, inst)
                 inst.finalized = True
             self._add_holder(inst, owner_pid, owner_create_time)
             return self._ready_result(profile.name, inst)
@@ -412,8 +424,9 @@ class InstanceManager:
         # would fail our fresh `--socket` bind with "address already in use", so
         # clear it before spawning.
         self._kill_socket_orphans(sock)
-        socks_port = _free_port()
-        http_port = _free_port()
+        host = self._config.listen_host
+        socks_port = _free_port(host)
+        http_port = _free_port(host)
         log_path = str(rundir / "tailscaled.log")
 
         argv = [
@@ -421,8 +434,8 @@ class InstanceManager:
             "--tun=userspace-networking",
             f"--socket={sock}",
             f"--statedir={statedir}",
-            f"--socks5-server=127.0.0.1:{socks_port}",
-            f"--outbound-http-proxy-listen=127.0.0.1:{http_port}",
+            f"--socks5-server={host}:{socks_port}",
+            f"--outbound-http-proxy-listen={host}:{http_port}",
             "--port=0",
         ]
         pid = self._spawn_daemon(argv, log_path)
@@ -430,6 +443,18 @@ class InstanceManager:
             create_time = self._procs.create_time(pid)
         except Exception as exc:  # noqa: BLE001
             raise InstanceError(f"daemon for {profile.name!r} died immediately: {exc}") from exc
+        inst = Instance(
+            profile=profile.name,
+            pid=pid,
+            create_time=create_time,
+            socket=sock,
+            statedir=statedir,
+            socks_port=socks_port,
+            http_port=http_port,
+            created_at=_now_iso(),
+            holders=[Holder(owner_pid, owner_create_time, _now_iso())],
+            listen_host=host,
+        )
 
         client = self._make_client(sock)
         try:
@@ -482,10 +507,8 @@ class InstanceManager:
                     # Register a pending instance held by the caller so a re-run
                     # reuses it, and reap cleans it up if the caller dies before
                     # authenticating.
-                    self._register_pending(
-                        profile, pid, create_time, sock, statedir, socks_port,
-                        http_port, owner_pid, owner_create_time,
-                    )
+                    inst.finalized = False  # awaiting first login; finalize on re-up
+                    self._register(inst)
                     return self._auth_result(profile.name, client)
 
         # Running: confirm shields, set exit node (if any), start forwards,
@@ -502,21 +525,8 @@ class InstanceManager:
             self._kill(pid)
             self._cleanup_socket(sock)
             raise
-        forwards = self._start_forwards(profile, rundir, socks_port)
-        inst = Instance(
-            profile=profile.name,
-            pid=pid,
-            create_time=create_time,
-            socket=sock,
-            statedir=statedir,
-            socks_port=socks_port,
-            http_port=http_port,
-            created_at=_now_iso(),
-            forwards=forwards,
-            holders=[Holder(owner_pid, owner_create_time, _now_iso())],
-        )
-        with self._store.transaction() as reg:
-            reg.instances[profile.name] = inst
+        inst.forwards = self._start_forwards(profile, inst)
+        self._register(inst)
         return self._ready_result(profile.name, inst)
 
     def _enforce_shields(self, client: TailscaleClient, profile_name: str) -> bool:
@@ -585,14 +595,16 @@ class InstanceManager:
         ]
         self._spawn_login(argv, log_path)
 
-    def _start_forwards(
-        self, profile: Profile, rundir, socks_port: int
-    ) -> list[Forward]:
+    def _start_forwards(self, profile: Profile, inst: Instance) -> list[Forward]:
+        rundir = paths.instance_dir(profile.name)
         forwards: list[Forward] = []
         for pf in profile.port_forwards:
-            lp = pf.local_port or _free_port()
+            lp = pf.local_port or _free_port(inst.listen_host)
             log_path = str(rundir / f"forward-{pf.service}.log")
-            fpid = self._spawn_forwarder(lp, socks_port, pf.remote_host, pf.remote_port, log_path)
+            route = ForwardRoute(
+                inst.listen_host, lp, inst.socks_port, pf.remote_host, pf.remote_port
+            )
+            fpid = self._spawn_forwarder(route, log_path)
             fct: float | None
             try:
                 fct = self._procs.create_time(fpid)
@@ -620,7 +632,7 @@ class InstanceManager:
                 ):
                     print(
                         f"warning: {profile.name}: forward {f.service!r} "
-                        f"(127.0.0.1:{f.local_port}) failed to start — check "
+                        f"({inst.listen_host}:{f.local_port}) failed to start — check "
                         f"{rundir}/forward-{f.service}.log (port in use?).",
                         file=sys.stderr,
                     )
@@ -663,25 +675,21 @@ class InstanceManager:
             self._cleanup_socket(socket_path)
         return killed
 
-    def _register_pending(
-        self, profile, pid, create_time, sock, statedir, socks_port, http_port,
-        owner_pid, owner_create_time,
-    ) -> None:
+    def _register(self, inst: Instance) -> None:
+        """Record an instance. A pending one is held by its caller so it survives
+        until they re-up after auth, and is reaped if the caller dies first."""
         with self._store.transaction() as reg:
-            reg.instances[profile.name] = Instance(
-                profile=profile.name,
-                pid=pid,
-                create_time=create_time,
-                socket=sock,
-                statedir=statedir,
-                socks_port=socks_port,
-                http_port=http_port,
-                created_at=_now_iso(),
-                forwards=[],
-                finalized=False,  # awaiting first login; finalize on re-up
-                # Held by the caller so it survives until they re-up (after auth)
-                # — and is reaped if the caller dies first.
-                holders=[Holder(owner_pid, owner_create_time, _now_iso())],
+            reg.instances[inst.profile] = inst
+
+    def _warn_listen_drift(self, inst: Instance) -> None:
+        """A daemon spawned before listen_host changed keeps its old bind until
+        its last holder exits; say so on every claim rather than hide it."""
+        if inst.listen_host != self._config.listen_host:
+            print(
+                f"warning: {inst.profile}: instance listens on {inst.listen_host}, "
+                f"profiles.yaml says {self._config.listen_host}; it moves when its "
+                f"holders exit and the daemon respawns.",
+                file=sys.stderr,
             )
 
     def _add_holder(self, inst: Instance, owner_pid: int, owner_create_time: float) -> None:
@@ -923,6 +931,7 @@ class InstanceManager:
             socks_port=inst.socks_port,
             http_port=inst.http_port,
             forwards={f.service: f.local_port for f in inst.forwards},
+            listen_host=inst.listen_host,
         )
 
     @staticmethod
