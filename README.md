@@ -84,6 +84,11 @@ start rather than fall back to `127.0.0.1`.
 An instance spawned before `listen_host` changed keeps its old address until
 its holders exit, and every claim on it prints a warning.
 
+Port forwards are for protocols that are not HTTP (SQL Server, ClickHouse native,
+Postgres). A forward relays raw bytes, so a web page that rebinds a hostname to
+its address could talk through it. Reach HTTP services through `run`'s proxy
+variables instead.
+
 ## profiles.yaml
 
 ```yaml
