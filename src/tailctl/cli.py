@@ -23,6 +23,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import psutil
@@ -62,6 +63,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return EXIT_ERROR
+
+
+@dataclass(frozen=True)
+class _AuthKeySources:
+    """The auth-key sources `bootstrap` writes into a new profile block."""
+
+    env: str | None = None
+    ssm: str | None = None
+    ssm_profile: str | None = None
+    ssm_region: str | None = None
+
+    def yaml_fields(self) -> list[tuple[str, str]]:
+        """(profiles.yaml key, value) for each source that is set, in file order."""
+        fields = [
+            ("auth_key_env", self.env),
+            ("auth_key_ssm", self.ssm),
+            ("auth_key_ssm_profile", self.ssm_profile),
+            ("auth_key_ssm_region", self.ssm_region),
+        ]
+        return [(key, value) for key, value in fields if value]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -143,7 +164,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     p_boot.add_argument(
         "--auth-key-ssm",
-        help="explicit /client/<scope>/<key> SSM path for first login",
+        help="optional SSM parameter holding the auth key for first login",
+    )
+    p_boot.add_argument(
+        "--auth-key-ssm-profile",
+        help="AWS CLI profile for the SSM read (default: the default profile)",
+    )
+    p_boot.add_argument(
+        "--auth-key-ssm-region",
+        help="AWS region for the SSM read (default: the profile's region)",
     )
     p_boot.add_argument(
         "--port-forward",
@@ -287,13 +316,15 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         )
         ok = False
 
-    ssm_profiles = {
-        f"secrets-{profile.auth_key_ssm.split('/')[2]}"
+    # (AWS CLI profile, region) pairs the SSM fallback reads with. AWS_* is
+    # scrubbed, so an undeclared profile means the default one.
+    ssm_sessions = {
+        (profile.auth_key_ssm_profile or "default", profile.auth_key_ssm_region)
         for profile in config.profiles.by_name.values()
         if profile.auth_key_ssm
     }
     aws = shutil.which("aws")
-    if ssm_profiles and not aws:
+    if ssm_sessions and not aws:
         print("aws: NOT FOUND — SSM auth-key resolution unavailable", file=sys.stderr)
         ok = False
     elif aws:
@@ -303,19 +334,11 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             for key, value in os.environ.items()
             if not key.startswith("AWS_")
         }
-        for profile_name in sorted(ssm_profiles):
+        for profile_name, region in sorted(ssm_sessions, key=lambda s: (s[0], s[1] or "")):
+            argv = [aws, "sts", "get-caller-identity", "--profile", profile_name]
+            argv += ["--output", "json"] + (["--region", region] if region else [])
             result = subprocess.run(
-                [
-                    aws,
-                    "sts",
-                    "get-caller-identity",
-                    "--profile",
-                    profile_name,
-                    "--region",
-                    "us-east-2",
-                    "--output",
-                    "json",
-                ],
+                argv,
                 capture_output=True,
                 text=True,
                 timeout=20,
@@ -638,8 +661,7 @@ def _render_profile_block(
     tailnet: str | None,
     exit_node: str | None,
     accept_routes: bool,
-    auth_key_env: str | None,
-    auth_key_ssm: str | None,
+    auth: _AuthKeySources,
     forwards: list[tuple[str, str, int]],
 ) -> str:
     """Render a profiles.yaml profile block as text (so existing comments in the
@@ -650,10 +672,8 @@ def _render_profile_block(
     if exit_node:
         lines.append(f"    exit_node: {exit_node}")
     lines.append(f"    accept_routes: {'true' if accept_routes else 'false'}")
-    if auth_key_env:
-        lines.append(f"    auth_key_env: {auth_key_env}")
-    if auth_key_ssm:
-        lines.append(f"    auth_key_ssm: {auth_key_ssm}")
+    for key, value in auth.yaml_fields():
+        lines.append(f"    {key}: {value}")
     if forwards:
         lines.append("    port_forwards:")
         for svc, host, port in forwards:
@@ -717,14 +737,12 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
             return EXIT_USAGE
         forwards.append((svc, host, port))
 
-    auth_key_env = args.auth_key_env
-    auth_key_ssm = args.auth_key_ssm
-    if bool(auth_key_env) != bool(auth_key_ssm):
-        print(
-            "error: --auth-key-env and --auth-key-ssm must be supplied together",
-            file=sys.stderr,
-        )
-        return EXIT_USAGE
+    auth = _AuthKeySources(
+        env=args.auth_key_env,
+        ssm=args.auth_key_ssm,
+        ssm_profile=args.auth_key_ssm_profile,
+        ssm_region=args.auth_key_ssm_region,
+    )
 
     block = _render_profile_block(
         name,
@@ -732,8 +750,7 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
         args.tailnet,
         args.exit_node,
         args.accept_routes,
-        auth_key_env,
-        auth_key_ssm,
+        auth,
         forwards,
     )
 
@@ -751,8 +768,8 @@ def _cmd_bootstrap(args: argparse.Namespace) -> int:
 
     print(f"bootstrapped profile {name!r} (account={account_id}, tailnet={args.tailnet})")
     print("next steps to finish onboarding this tailnet:")
-    if auth_key_ssm:
-        print(f"  1. seed the reusable auth key at {auth_key_ssm}")
+    if auth.ssm:
+        print(f"  1. seed the reusable auth key at {auth.ssm}")
         print(f"  2. register the node:  tailctl up {name}")
     else:
         print(f"  1. register interactively:  tailctl up {name}")

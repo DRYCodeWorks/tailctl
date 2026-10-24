@@ -322,3 +322,47 @@ def test_listen_host_rejects_a_bare_integer(home: Path) -> None:
     paths.profiles_yaml().write_text("listen_host: 2130706433\n" + _MINIMAL)
     with pytest.raises(ConfigError, match="must be a string"):
         load()
+
+
+_AUTH_PROFILE = "default: a\nprofiles:\n  a:\n    account_id: a1\n"
+
+
+def test_auth_key_env_alone_loads(home: Path) -> None:
+    """0.2.0 refused this profile (no auth_key_ssm); either source stands alone."""
+    paths.profiles_yaml().write_text(_AUTH_PROFILE + "    auth_key_env: A_TS_KEY\n")
+    p = load().profiles.get("a")
+    assert p.auth_key_env == "A_TS_KEY"
+    assert p.auth_key_ssm is None
+
+
+def test_auth_key_ssm_accepts_any_parameter_name(home: Path) -> None:
+    paths.profiles_yaml().write_text(
+        _AUTH_PROFILE + "    auth_key_ssm: /team/a/ts_authkey\n"
+        "    auth_key_ssm_profile: acme-secrets\n"
+        "    auth_key_ssm_region: us-west-2\n"
+    )
+    p = load().profiles.get("a")
+    assert p.auth_key_ssm == "/team/a/ts_authkey"
+    assert p.auth_key_ssm_profile == "acme-secrets"
+    assert p.auth_key_ssm_region == "us-west-2"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "auth_key_ssm: '/team/a/key with space'",
+        "auth_key_ssm_profile: --debug",
+        "auth_key_ssm_region: west",
+    ],
+)
+def test_auth_key_ssm_fields_reject_bad_shapes(home: Path, field: str) -> None:
+    extra = "" if field.startswith("auth_key_ssm:") else "    auth_key_ssm: /team/a/k\n"
+    paths.profiles_yaml().write_text(_AUTH_PROFILE + extra + f"    {field}\n")
+    with pytest.raises(ConfigError, match="is not valid"):
+        load()
+
+
+def test_auth_key_ssm_profile_requires_a_parameter(home: Path) -> None:
+    paths.profiles_yaml().write_text(_AUTH_PROFILE + "    auth_key_ssm_profile: acme-secrets\n")
+    with pytest.raises(ConfigError, match="without auth_key_ssm"):
+        load()

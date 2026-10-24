@@ -44,6 +44,10 @@ class Profile:
     # Explicit SSM parameter for interactive first registration. The path is
     # declared per profile; it is never inferred from the profile or env name.
     auth_key_ssm: str | None = None
+    # AWS CLI profile and region for that read. Unset means the default profile
+    # and its configured region.
+    auth_key_ssm_profile: str | None = None
+    auth_key_ssm_region: str | None = None
 
 
 class UnknownProfileError(KeyError):

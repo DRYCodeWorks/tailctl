@@ -174,7 +174,9 @@ def test_doctor_reports_ssm_session_without_inherited_aws(
     paths.profiles_yaml().write_text(
         "default: dg\nprofiles:\n  dg:\n    account_id: a1b2\n"
         "    auth_key_env: DG_TS_KEY\n"
-        "    auth_key_ssm: /client/sazabi/dg_ts_authkey\n"
+        "    auth_key_ssm: /team/dg/ts_authkey\n"
+        "    auth_key_ssm_profile: acme-secrets\n"
+        "    auth_key_ssm_region: us-west-2\n"
     )
     monkeypatch.setattr(Path, "exists", lambda self: True)
     _stub_no_instances(monkeypatch)
@@ -183,13 +185,15 @@ def test_doctor_reports_ssm_session_without_inherited_aws(
     observed = {}
 
     def run(argv, **kwargs):  # noqa: ANN001, ANN201
+        observed["argv"] = argv
         observed["env"] = kwargs["env"]
         return SimpleNamespace(returncode=0, stdout="{}", stderr="")
 
     monkeypatch.setattr("subprocess.run", run)
     assert cli.main(["doctor"]) == 0
     assert not any(key.startswith("AWS_") for key in observed["env"])
-    assert "aws session secrets-sazabi: ready" in capsys.readouterr().out
+    assert observed["argv"][-2:] == ["--region", "us-west-2"]
+    assert "aws session acme-secrets: ready" in capsys.readouterr().out
 
 
 # --- profiles / reset ---
@@ -222,12 +226,13 @@ def test_config_rejects_dotted_auth_key_env(home: Path) -> None:
     rc = cli.main(["profiles"])
     assert rc != 0  # config load fails with a clear error
 
-def test_config_requires_ssm_for_auth_key_env(home: Path) -> None:
+def test_config_accepts_auth_key_env_without_ssm(home: Path) -> None:
+    """0.2.0 refused this config, breaking every command for env-only profiles."""
     paths.profiles_yaml().write_text(
         "default: dg\nprofiles:\n  dg:\n    account_id: a1b2\n"
         "    auth_key_env: DG_TS_KEY\n"
     )
-    assert cli.main(["profiles"]) != 0
+    assert cli.main(["profiles"]) == 0
 
 
 def test_profiles_lists_with_default_marker(
@@ -275,7 +280,8 @@ def test_bootstrap_appends_profile_preserving_existing(
             "--exit-node", "ex1",
             "--port-forward", "ch=10.0.0.5:9000",
             "--auth-key-env", "newnet_ts_authkey",
-            "--auth-key-ssm", "/client/sazabi/newnet_ts_authkey",
+            "--auth-key-ssm", "/team/newnet/ts_authkey",
+            "--auth-key-ssm-profile", "acme-secrets",
         ]
     )
     assert rc == 0
@@ -288,12 +294,24 @@ def test_bootstrap_appends_profile_preserving_existing(
     assert p.account_id == "ab12"
     assert p.exit_node == "ex1"
     assert p.auth_key_env == "newnet_ts_authkey"
-    assert p.auth_key_ssm == "/client/sazabi/newnet_ts_authkey"
+    assert p.auth_key_ssm == "/team/newnet/ts_authkey"
+    assert p.auth_key_ssm_profile == "acme-secrets"
     assert p.port_forwards[0].service == "ch"
     assert p.port_forwards[0].remote_host == "10.0.0.5"
     assert p.port_forwards[0].remote_port == 9000
     out = capsys.readouterr().out
-    assert "/client/sazabi/newnet_ts_authkey" in out
+    assert "/team/newnet/ts_authkey" in out
+
+
+def test_bootstrap_accepts_auth_key_env_alone(home: Path) -> None:
+    _write_minimal_config(home)
+    rc = cli.main(["bootstrap", "envonly", "--account-id", "ee11", "--auth-key-env", "ENV_TS_KEY"])
+    assert rc == 0
+    from tailctl.config import load as load_config
+
+    p = load_config().profiles.get("envonly")
+    assert p.auth_key_env == "ENV_TS_KEY"
+    assert p.auth_key_ssm is None
 
 
 def test_bootstrap_refuses_duplicate_without_force(

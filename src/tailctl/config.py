@@ -39,6 +39,13 @@ _ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 # Env-var-name safe: what a shell can actually export/expand. Used for
 # port-forward service names (exported as <SERVICE>_ADDR) and auth_key_env.
 _ENV_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Optional per-profile strings validated by shape alone: an SSM parameter name,
+# an AWS CLI profile name, an AWS region.
+_FIELD_PATTERNS = {
+    "auth_key_ssm": re.compile(r"[A-Za-z0-9_./-]{1,2048}"),
+    "auth_key_ssm_profile": re.compile(r"[A-Za-z0-9][A-Za-z0-9_.+@-]*"),
+    "auth_key_ssm_region": re.compile(r"[a-z]{2}(-[a-z]+)+-[0-9]+"),
+}
 # Where the SOCKS/HTTP proxies and port-forwards listen. A loopback alias (e.g.
 # 127.84.67.1 on lo0) keeps them off 127.0.0.1, which container runtimes such
 # as OrbStack forward host.docker.internal to: every container could otherwise
@@ -219,23 +226,14 @@ def _parse(raw: dict[str, Any]) -> Config:
                 f"shell cannot export names containing '.' or '-'."
             )
 
-        auth_key_ssm = body.get("auth_key_ssm") or None
-        if auth_key_ssm is not None and (
-            not isinstance(auth_key_ssm, str)
-            or not re.fullmatch(
-                r"/client/(sazabi|frost)/"
-                r"[A-Za-z_][A-Za-z0-9_]*",
-                auth_key_ssm,
-            )
-        ):
+        auth_key_ssm, auth_key_ssm_profile, auth_key_ssm_region = (
+            _parse_optional_field(name, key, body.get(key))
+            for key in ("auth_key_ssm", "auth_key_ssm_profile", "auth_key_ssm_region")
+        )
+        if (auth_key_ssm_profile or auth_key_ssm_region) and not auth_key_ssm:
             raise ConfigError(
-                f"profiles.yaml: profile {name!r} `auth_key_ssm` must be an "
-                "explicit /client/<known-scope>/<key> path"
-            )
-        if auth_key_env and not auth_key_ssm:
-            raise ConfigError(
-                f"profiles.yaml: profile {name!r} has auth_key_env but no "
-                "auth_key_ssm fallback"
+                f"profiles.yaml: profile {name!r} sets auth_key_ssm_profile or "
+                "auth_key_ssm_region without auth_key_ssm"
             )
 
         port_forwards = _parse_port_forwards(name, body.get("port_forwards"))
@@ -250,6 +248,8 @@ def _parse(raw: dict[str, Any]) -> Config:
             port_forwards=port_forwards,
             auth_key_env=auth_key_env,
             auth_key_ssm=auth_key_ssm,
+            auth_key_ssm_profile=auth_key_ssm_profile,
+            auth_key_ssm_region=auth_key_ssm_region,
         )
 
     if default_name not in by_name:
@@ -282,6 +282,15 @@ def _parse_listen_host(raw: Any) -> str:
             f"profiles.yaml: `listen_host` {raw!r} must be a loopback address (127.0.0.0/8)"
         )
     return str(addr)
+
+
+def _parse_optional_field(profile_name: str, key: str, raw: Any) -> str | None:
+    """An optional string field that must match its ``_FIELD_PATTERNS`` shape."""
+    if raw is None or raw == "":
+        return None
+    if not isinstance(raw, str) or not _FIELD_PATTERNS[key].fullmatch(raw):
+        raise ConfigError(f"profiles.yaml: profile {profile_name!r} `{key}` {raw!r} is not valid")
+    return raw
 
 
 def _parse_port_forwards(profile_name: str, raw: Any) -> tuple[PortForward, ...]:

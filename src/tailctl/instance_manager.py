@@ -178,55 +178,51 @@ def _default_schedule_reap(linger_seconds: float) -> None:
 
 def _default_secret_resolve(profile: Profile) -> str | None:
     """Resolve one declared SSM auth key without inherited AWS routing state."""
-    parameter = profile.auth_key_ssm
-    if not parameter:
-        return None
-    parts = parameter.split("/")
-    if (
-        len(parts) != 4
-        or parts[1] != "client"
-        or parts[2] not in {"sazabi", "frost"}
-    ):
+    if not profile.auth_key_ssm:
         return None
     aws = shutil.which("aws")
     if not aws:
         return None
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if not key.startswith("AWS_")
-    }
     try:
         proc = subprocess.run(
-            [
-                aws,
-                "ssm",
-                "get-parameter",
-                "--name",
-                parameter,
-                "--with-decryption",
-                "--profile",
-                f"secrets-{parts[2]}",
-                "--region",
-                "us-east-2",
-                "--output",
-                "json",
-            ],
+            _ssm_get_argv(aws, profile),
             capture_output=True,
             text=True,
             timeout=20,
             check=False,
-            env=env,
+            env=_env_without_aws(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
+    return _parameter_value(proc.stdout, profile.auth_key_ssm)
+
+
+def _ssm_get_argv(aws: str, profile: Profile) -> list[str]:
+    """The `aws ssm get-parameter` call for the profile's declared key."""
+    argv = [aws, "ssm", "get-parameter", "--name", str(profile.auth_key_ssm)]
+    argv += ["--with-decryption", "--output", "json"]
+    if profile.auth_key_ssm_profile:
+        argv += ["--profile", profile.auth_key_ssm_profile]
+    if profile.auth_key_ssm_region:
+        argv += ["--region", profile.auth_key_ssm_region]
+    return argv
+
+
+def _env_without_aws() -> dict[str, str]:
+    """This environment minus every AWS_* variable, so an inherited profile,
+    credential or endpoint override can never redirect the read."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("AWS_")}
+
+
+def _parameter_value(stdout: str, name: str) -> str | None:
+    """The decrypted value, only when the response names the parameter we asked for."""
     try:
-        item = json.loads(proc.stdout).get("Parameter", {})
-    except (json.JSONDecodeError, TypeError):
+        item = json.loads(stdout).get("Parameter", {})
+    except (json.JSONDecodeError, TypeError, AttributeError):
         return None
-    value = item.get("Value") if item.get("Name") == parameter else None
+    value = item.get("Value") if item.get("Name") == name else None
     return value if isinstance(value, str) and value else None
 
 

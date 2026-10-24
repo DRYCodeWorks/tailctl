@@ -54,7 +54,7 @@ ln -sf "$PWD/.venv/bin/tailctl" ~/.local/bin/tailctl   # put it on PATH
 tailctl init                       # scaffold ~/.tailctl/profiles.yaml
 tailctl doctor                     # validate config + probe daemon + verify accounts
 tailctl bootstrap <name> --tailnet <t> [--exit-node <e>] \
-  [--auth-key-env ENV --auth-key-ssm /client/<scope>/<key>] \
+  [--auth-key-env ENV] [--auth-key-ssm NAME [--auth-key-ssm-profile P] [--auth-key-ssm-region R]] \
   [--port-forward svc=host:port]   # onboard a new tailnet with explicit auth sources
 tailctl up acme-dev              # spawn a userspace tailscaled for the profile
                                    #   (first time: prints a one-time auth URL)
@@ -102,7 +102,9 @@ profiles:
     exit_node: tailscale-subnet-router-development
     accept_routes: true
     auth_key_env: ACME_TS_AUTHKEY   # optional headless-wrapper short circuit
-    auth_key_ssm: /client/sazabi/acme_ts_authkey  # explicit interactive fallback
+    auth_key_ssm: /acme/tailscale/dev_authkey  # optional SSM fallback
+    auth_key_ssm_profile: acme-secrets         # optional AWS CLI profile for that read
+    auth_key_ssm_region: us-west-2             # optional; default is the profile's region
     port_forwards:
       - service: clickhouse        # exported as CLICKHOUSE_ADDR
         remote_host: 100.64.0.10
@@ -116,12 +118,15 @@ login persists in the profile's statedir and is reused on every later `up`/`run`
 (teardown never logs out). Authentication order:
 
 1. `auth_key_env`, when a headless wrapper injects it.
-2. The explicit `auth_key_ssm` path through the matching
-   `secrets-<scope>` Identity Center profile.
+2. The `auth_key_ssm` parameter, read with the AWS CLI as
+   `auth_key_ssm_profile` in `auth_key_ssm_region`. Without those, the read uses
+   your default AWS profile and its configured region.
 3. Interactive login URL when neither source resolves.
 
-The environment always wins, so launchd never attempts an SSO-backed read.
-SSM subprocesses receive no inherited `AWS_*` routing variables.
+Both sources are optional and independent. The environment always wins, so a
+headless wrapper that injects the key never attempts an SSO-backed read. SSM
+subprocesses receive no inherited `AWS_*` variables, so an ambient profile,
+credential or endpoint override can't redirect the read.
 
 Profiles that share an account but differ by exit node (e.g. Acme
 dev/staging/prod) are separate profiles → separate nodes → one auth each.

@@ -51,7 +51,9 @@ def _config() -> Config:
                 account_id="kk00",
                 tailnet="keyed.net",
                 auth_key_env="KEYED_TS_KEY",
-                auth_key_ssm="/client/sazabi/KEYED_TS_KEY",
+                auth_key_ssm="/team/keyed/ts_authkey",
+                auth_key_ssm_profile="acme-secrets",
+                auth_key_ssm_region="us-west-2",
             ),
         },
     )
@@ -385,9 +387,30 @@ def test_default_ssm_resolver_scrubs_aws_environment(
     monkeypatch.setattr("tailctl.instance_manager.subprocess.run", run)
     assert _default_secret_resolve(profile) == "ssm-key"
     assert not any(key.startswith("AWS_") for key in observed["env"])
-    assert "--profile" in observed["argv"]
-    assert "secrets-sazabi" in observed["argv"]
+    argv = observed["argv"]
+    assert argv[argv.index("--profile") + 1] == "acme-secrets"
+    assert argv[argv.index("--region") + 1] == "us-west-2"
     assert os.environ["AWS_PROFILE"] == "attacker"
+
+
+def test_default_ssm_resolver_without_a_declared_profile_uses_the_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = Profile(name="p", account_id="pp00", auth_key_ssm="ts_authkey")
+    monkeypatch.setenv("AWS_PROFILE", "attacker")
+    monkeypatch.setattr("tailctl.instance_manager.shutil.which", lambda name: "/fake/aws")
+    observed = {}
+
+    def run(argv, **kwargs):  # noqa: ANN001, ANN201
+        observed["argv"] = argv
+        observed["env"] = kwargs["env"]
+        body = {"Parameter": {"Name": "ts_authkey", "Value": "k"}}
+        return SimpleNamespace(returncode=0, stdout=json.dumps(body))
+
+    monkeypatch.setattr("tailctl.instance_manager.subprocess.run", run)
+    assert _default_secret_resolve(profile) == "k"
+    assert "--profile" not in observed["argv"] and "--region" not in observed["argv"]
+    assert not any(key.startswith("AWS_") for key in observed["env"])
 
 
 def test_discover_exit_node_matches_suffix_variant_not_prefix(tmp_home: Path) -> None:
